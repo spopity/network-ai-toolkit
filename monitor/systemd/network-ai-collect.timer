@@ -1,0 +1,11 @@
+[Unit]
+Description=Run network-ai-collect (the only LLM run) once a day, at night
+
+[Timer]
+# server timezone is UTC (Etc/UTC) -- adjust this if that's not your local night
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+Unit=network-ai-collect.service
+
+[Install]
+WantedBy=timers.target

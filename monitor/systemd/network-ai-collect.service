@@ -1,0 +1,10 @@
+[Unit]
+Description=Network AI - daily router check + LLM analysis of the 24h rollup
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/network-ai
+ExecStart=/opt/network-ai/.venv/bin/python3 /opt/network-ai/collect_and_analyze.py --config /opt/network-ai/config.yml --mode daily
+User=root

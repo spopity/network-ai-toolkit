@@ -1,0 +1,16 @@
+[Unit]
+Description=Network AI - router monitoring dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/network-ai
+Environment=NETWORK_AI_CONFIG=/opt/network-ai/config.yml
+ExecStart=/opt/network-ai/.venv/bin/python3 /opt/network-ai/dashboard/app.py
+Restart=always
+RestartSec=10
+User=root
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+logs/
+dashboard/frontend/node_modules/
+dashboard/frontend/dist/
+config.yml
+.pytest_cache/
+*.log
+*.code-workspace
