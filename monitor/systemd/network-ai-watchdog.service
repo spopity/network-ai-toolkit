@@ -1,0 +1,15 @@
+[Unit]
+Description=Network AI - router connectivity watchdog / PPPoE auto-restart
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/network-ai
+ExecStart=/opt/network-ai/.venv/bin/python3 /opt/network-ai/watchdog.py --config /opt/network-ai/config.yml
+Restart=always
+RestartSec=10
+User=root
+
+[Install]
+WantedBy=multi-user.target

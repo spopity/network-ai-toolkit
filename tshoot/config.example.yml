@@ -1,0 +1,30 @@
+# Tshoot -- ASUS router troubleshooting agent
+router:
+  name: asus-rt-ax88u
+  host: 192.168.1.1
+  port: 22
+  username: admin
+  key_filename: /root/.ssh/id_ed25519
+
+llm:
+  # GEMINI_API_KEY read from .env; model falls back to GEMINI_MODEL from .env
+  model: models/gemini-pro-latest
+  timeout: 120
+
+limits:
+  command_timeout_seconds: 30   # read-only diagnostics
+  change_timeout_seconds: 90    # approved changes (service restarts can be slow)
+
+# read-only access to the analyzer's output files (Tshoot never writes there)
+monitor:
+  latest_json: /opt/network-ai/logs/latest.json
+  watchdog_status_json: /opt/network-ai/logs/watchdog_status.json
+
+audit:
+  postgres: true   # also archive to table tshoot_audit (PG* vars in .env); JSONL is always written
+
+log_dir: logs
+
+server:
+  host: 127.0.0.1   # only the network-ai dashboard (same host) talks to Tshoot
+  port: 8090

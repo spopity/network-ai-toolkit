@@ -1,0 +1,21 @@
+#!/bin/sh
+# Asuswrt-Merlin hook: /jffs/scripts/wan-event <wan_unit> <event>
+# event = init | connecting | connected | disconnected | stopping | stopped
+# Reports every WAN state transition to the network-ai dashboard. Fire-and-forget
+# in the background so a dashboard outage never delays the router's WAN handling.
+# Source of truth: /opt/network-ai/router/wan-event (install: see README).
+
+DASHBOARD_URL="http://192.168.1.10:8080/api/router-event"   # set to your dashboard host
+
+unit="$1"
+event="$2"
+p="wan${unit}_"
+
+body=$(printf '{"unit":"%s","event":"%s","state":"%s","sbstate":"%s","auxstate":"%s","ip":"%s","gateway":"%s","router_uptime":"%s"}' \
+  "$unit" "$event" \
+  "$(nvram get ${p}state_t)" "$(nvram get ${p}sbstate_t)" "$(nvram get ${p}auxstate_t)" \
+  "$(nvram get ${p}ipaddr)" "$(nvram get ${p}gateway)" \
+  "$(cut -d' ' -f1 /proc/uptime)")
+
+logger -t network-ai "wan-event unit=$unit event=$event"
+( curl -s -m 5 -X POST -H 'Content-Type: application/json' -d "$body" "$DASHBOARD_URL" >/dev/null 2>&1 ) &

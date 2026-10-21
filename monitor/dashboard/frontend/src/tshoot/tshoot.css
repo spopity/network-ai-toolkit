@@ -1,0 +1,43 @@
+/* Markdown inside Tshoot chat bubbles */
+.prose-chat {
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: #e2e8f0;
+  overflow-wrap: anywhere;
+}
+.prose-chat > * + * { margin-top: 0.6em; }
+.prose-chat p { margin: 0; }
+.prose-chat strong { color: #fff; font-weight: 600; }
+.prose-chat a { color: #7dd3fc; text-decoration: underline; }
+.prose-chat ul, .prose-chat ol { margin: 0.4em 0; padding-left: 1.25em; }
+.prose-chat ul { list-style: disc; }
+.prose-chat ol { list-style: decimal; }
+.prose-chat li + li { margin-top: 0.2em; }
+.prose-chat li::marker { color: #38bdf8; }
+.prose-chat h1, .prose-chat h2, .prose-chat h3, .prose-chat h4 {
+  margin: 0.8em 0 0.3em;
+  font-size: 13.5px;
+  font-weight: 650;
+  color: #bae6fd;
+}
+.prose-chat code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  background: rgba(56, 189, 248, 0.1);
+  color: #bae6fd;
+  padding: 0.1em 0.35em;
+  border-radius: 0.35em;
+}
+.prose-chat pre {
+  background: rgba(0, 0, 0, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 0.6em;
+  padding: 0.6em 0.8em;
+  overflow-x: auto;
+}
+.prose-chat pre code { background: none; color: #cbd5e1; padding: 0; font-size: 11.5px; }
+.prose-chat table { display: block; overflow-x: auto; border-collapse: collapse; font-size: 12.5px; }
+.prose-chat th, .prose-chat td { border: 1px solid rgba(255, 255, 255, 0.08); padding: 0.3em 0.6em; text-align: left; }
+.prose-chat th { background: rgba(255, 255, 255, 0.04); color: #fff; font-weight: 600; }
+.prose-chat blockquote { border-left: 3px solid #8b5cf6; padding-left: 0.8em; color: #cbd5e1; }
+.prose-chat hr { border-color: rgba(255, 255, 255, 0.08); }
