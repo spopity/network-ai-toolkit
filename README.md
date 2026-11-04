@@ -6,7 +6,7 @@ RT-AX88U Pro with an AiMesh setup). Two cooperating projects:
 | Folder | What it does |
 |---|---|
 | [`monitor/`](monitor/) | SSH collector, log summarizer, PPPoE watchdog, Postgres archive and a React/TypeScript dashboard. Checks run every 5 minutes with no LLM; one Gemini (or local Ollama) analysis runs per day over a compressed 24 h rollup. |
-| [`tshoot/`](tshoot/) | "Tshoot", a Gemini function-calling agent that troubleshoots the router over SSH from a chat tab in the dashboard. Read-only diagnostics run freely, changes need an explicit Approve/Reject, and destructive commands (factory reset, flash writes…) are always blocked. A rule-based policy does the classification, not the LLM. |
+| [`tshoot/`](tshoot/) | "Tshoot", a function-calling agent that troubleshoots the router over SSH from a chat tab in the dashboard. Claude (via the Claude Agent SDK) answers read-only by default, with Gemini as a selectable model and automatic fallback. Read-only diagnostics run freely, changes need an explicit Approve/Reject, and destructive commands (factory reset, flash writes…) are always blocked. A rule-based policy does the classification, not the LLM. |
 
 ## Highlights
 
@@ -25,4 +25,4 @@ Each folder has its own README with setup steps. In short:
 
 ## Stack
 
-Python 3 · Paramiko · Flask (SSE) · Gemini API / Ollama · PostgreSQL · React · TypeScript · Vite · Tailwind CSS · systemd
+Python 3 · Paramiko · Flask (SSE) · Claude Agent SDK · Gemini API / Ollama · PostgreSQL · React · TypeScript · Vite · Tailwind CSS · systemd

@@ -4,8 +4,13 @@ A turn is a generator of UI events (dicts). It alternates Gemini calls and tool
 executions until Gemini answers in plain text, or until a state-changing
 command needs the user's approval -- then the turn ends and the session keeps
 the pending call. ``resume()`` runs (or rejects) it and continues the loop.
+
+With ``use_claude`` a chat turn goes to Claude instead, read-only: no
+propose_change, and run_command only runs commands the policy classifies as
+read. If Claude fails, Gemini answers the turn in the same read-only mode.
 """
 import json
+import logging
 import queue
 import threading
 import time
@@ -14,10 +19,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterator, Optional
 
-from . import policy
+from . import claude_agent, policy
 from .audit import AuditLog
 from .gemini import Gemini, GeminiError
-from .prompt import SYSTEM_PROMPT, TOOLS
+from .prompt import (FIX_STEP, FIX_STEP_READ_ONLY, POLICY_RULE, POLICY_RULE_READ_ONLY, READ_ONLY_NOTE,
+                     READ_ONLY_TOOLS, SYSTEM_PROMPT, TOOLS)
 from .redact import redact
 from .ssh import CommandResult, RouterShell
 
@@ -26,6 +32,8 @@ MODEL_OUTPUT_CHARS = 12_000  # per command, sent to Gemini
 UI_OUTPUT_CHARS = 64_000     # per command, sent to the browser
 MAX_CONTENTS = 80            # history entries kept per session
 SESSION_TTL = 6 * 3600
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -93,9 +101,12 @@ def _fn_response(call: dict, payload: dict) -> dict:
     return {"functionResponse": resp}
 
 
-def _run_with_heartbeat(fn: Callable, label: str, every: float = 8.0) -> Iterator:
-    """Run ``fn`` in a thread, yielding status events while it works; the last item is ('result', value)."""
-    q: queue.Queue = queue.Queue()
+def _run_with_heartbeat(fn: Callable, label: str, every: float = 8.0, events: queue.Queue = None) -> Iterator:
+    """Run ``fn`` in a thread, yielding status events while it works; the last item is ('result', value).
+
+    ``fn`` may put ("event", dict) items on ``events`` to have them yielded as they happen.
+    """
+    q: queue.Queue = events or queue.Queue()
 
     def worker():
         try:
@@ -108,9 +119,12 @@ def _run_with_heartbeat(fn: Callable, label: str, every: float = 8.0) -> Iterato
     while True:
         try:
             status, value = q.get(timeout=every)
-            break
         except queue.Empty:
             yield {"type": "status", "content": f"{label} ({int(time.monotonic() - start)}s)"}
+            continue
+        if status != "event":
+            break
+        yield value
     if status == "err":
         raise value
     yield ("result", value)
@@ -125,15 +139,17 @@ class TshootAgent:
         self.cmd_timeout = int(cfg.get("limits", {}).get("command_timeout_seconds", 30))
         self.change_timeout = int(cfg.get("limits", {}).get("change_timeout_seconds", 90))
         router = cfg["router"]
-        self.system = SYSTEM_PROMPT.format(router_name=router.get("name", "router"),
-                                           router_host=router["host"], cmd_timeout=self.cmd_timeout)
+        fmt = dict(router_name=router.get("name", "router"), router_host=router["host"], cmd_timeout=self.cmd_timeout)
+        self.system = SYSTEM_PROMPT.format(fix_step=FIX_STEP, policy_rule=POLICY_RULE, **fmt)
+        self.system_read_only = SYSTEM_PROMPT.format(
+            fix_step=FIX_STEP_READ_ONLY, policy_rule=POLICY_RULE_READ_ONLY, **fmt) + READ_ONLY_NOTE
         mon = cfg.get("monitor", {})
         self.latest_path = Path(mon.get("latest_json", "/opt/network-ai/logs/latest.json"))
         self.watchdog_path = Path(mon.get("watchdog_status_json", "/opt/network-ai/logs/watchdog_status.json"))
 
     # ------------------------------------------------------------ public API
 
-    def chat(self, session: Session, message: str) -> Iterator[dict]:
+    def chat(self, session: Session, message: str, use_claude: bool = False) -> Iterator[dict]:
         self._repair(session)
         parts = []
         if session.pending:
@@ -141,9 +157,13 @@ class TshootAgent:
             p = session.pending
             parts += self._reject_parts(session, p, "User sent a new message instead of approving.")
             yield {"type": "approval_update", "id": p.id, "status": "superseded"}
+        prior = self._text_history(session)
         parts.append({"text": message})
         session.contents.append({"role": "user", "parts": parts})
-        yield from self._loop(session)
+        if use_claude:
+            yield from self._claude_turn(session, prior, message)
+        else:
+            yield from self._loop(session)
 
     def resume(self, session: Session, approval_id: str, approve: bool, note: str = "") -> Iterator[dict]:
         p = session.pending
@@ -182,14 +202,46 @@ class TshootAgent:
 
     # ------------------------------------------------------------ loop
 
-    def _loop(self, session: Session) -> Iterator[dict]:
+    def _claude_turn(self, session: Session, prior: list, message: str) -> Iterator[dict]:
+        yield {"type": "status", "content": "Engaging Claude (read-only)…"}
+        events: queue.Queue = queue.Queue()
+
+        def call_tool(name: str, args: dict) -> dict:
+            # runs on Claude's tool thread; UI events are relayed through the queue
+            payload = None
+            for ev in self._handle_call(session, {"name": name, "args": args}, 0, read_only=True):
+                if isinstance(ev, tuple):
+                    payload = ev[1]["functionResponse"]["response"]
+                elif isinstance(ev, dict):
+                    events.put(("event", ev))
+            return payload
+
+        answer = None
+        try:
+            for ev in _run_with_heartbeat(
+                    lambda: claude_agent.ask_claude("tshoot_chat", self.system_read_only, READ_ONLY_TOOLS, call_tool,
+                                                    prior, message), "Claude is thinking", events=events):
+                if isinstance(ev, tuple):
+                    answer = ev[1]
+                else:
+                    yield ev
+        except Exception as e:
+            logger.warning("Claude unavailable, Gemini answers instead: %s", e)
+            yield from self._loop(session, read_only=True, prefix=claude_agent.FALLBACK_NOTE)
+            return
+        text, model = answer
+        session.contents.append({"role": "model", "parts": [{"text": text}]})  # keeps context if the user switches to Gemini
+        yield self._final(text, model=model if model.startswith("claude") else f"claude-{model}")
+
+    def _loop(self, session: Session, read_only: bool = False, prefix: str = "") -> Iterator[dict]:
+        system, tools = (self.system_read_only, READ_ONLY_TOOLS) if read_only else (self.system, TOOLS)
         for step in range(MAX_STEPS):
             self._trim(session)
             yield {"type": "status", "content": "Tshoot is analyzing…" if step == 0 else "Reviewing results…"}
             content = None
             try:
                 for ev in _run_with_heartbeat(
-                        lambda: self.gemini.generate(session.contents, self.system, TOOLS), "Thinking"):
+                        lambda: self.gemini.generate(session.contents, system, tools), "Thinking"):
                     if isinstance(ev, tuple):
                         content = ev[1]
                     else:
@@ -202,7 +254,7 @@ class TshootAgent:
             text = "\n".join(p["text"] for p in content["parts"] if p.get("text") and not p.get("thought")).strip()
             calls = [p["functionCall"] for p in content["parts"] if "functionCall" in p]
             if not calls:
-                yield self._final(text or "(no answer)")
+                yield self._final(prefix + (text or "(no answer)"))
                 return
 
             if text:
@@ -217,7 +269,7 @@ class TshootAgent:
                         "reason": "Another change is already awaiting the user's approval; propose one change at a time."}))
                     continue
                 result_part = None
-                for ev in self._handle_call(session, call, len(responses)):
+                for ev in self._handle_call(session, call, len(responses), read_only):
                     if isinstance(ev, Pending):
                         pending = ev
                     elif isinstance(ev, tuple):
@@ -235,12 +287,16 @@ class TshootAgent:
                 return
             session.contents.append({"role": "user", "parts": responses})
 
-        yield self._final(f"I've used {MAX_STEPS} reasoning steps on this without finishing. "
+        yield self._final(prefix + f"I've used {MAX_STEPS} reasoning steps on this without finishing. "
                           "Tell me to continue, or narrow the question.")
 
-    def _handle_call(self, session: Session, call: dict, slot: int) -> Iterator:
+    def _handle_call(self, session: Session, call: dict, slot: int, read_only: bool = False) -> Iterator:
         name = call.get("name")
         args = call.get("args") or {}
+
+        if read_only and name not in {t["name"] for t in READ_ONLY_TOOLS}:
+            yield ("result", _fn_response(call, {"status": "error", "reason": f"{name} is not available in read-only mode"}))
+            return
 
         if name == "get_monitor_snapshot":
             yield ("result", _fn_response(call, self._monitor_snapshot()))
@@ -259,6 +315,15 @@ class TshootAgent:
             yield {"type": "command", "id": uuid.uuid4().hex[:10], "command": command, "kind": verdict.kind,
                    "purpose": purpose, "status": verdict.kind, "reason": verdict.reason}
             yield ("result", _fn_response(call, {"status": verdict.kind, "reason": verdict.reason}))
+            return
+
+        if read_only and verdict.kind == policy.WRITE:
+            self.audit.record(policy.REFUSED, session.id, command, policy.WRITE, reason=f"read-only mode: {verdict.reason}")
+            yield {"type": "command", "id": uuid.uuid4().hex[:10], "command": command, "kind": policy.REFUSED,
+                   "purpose": purpose, "status": policy.REFUSED, "reason": f"read-only mode: {verdict.reason}"}
+            yield ("result", _fn_response(call, {"status": policy.REFUSED, "reason": (
+                f"Not run: read-only mode ({verdict.reason}). Recommend the change to the user instead; they can "
+                "switch the chat model to Gemini to have it applied with an approval.")}))
             return
 
         if name == "run_command" and verdict.kind == policy.WRITE and verdict.opaque:
@@ -336,9 +401,18 @@ class TshootAgent:
         responses[p.slot] = _fn_response(p.call, {"status": "rejected_by_user", "note": note})
         return responses
 
-    def _final(self, text: str, **extra) -> dict:
-        model = (self.gemini.last_model_version or self.gemini.model).replace("models/", "")
+    def _final(self, text: str, model: str = None, **extra) -> dict:
+        model = model or (self.gemini.last_model_version or self.gemini.model).replace("models/", "")
         return {"type": "final", "agent": "tshoot", "model": model, "content": text, **extra}
+
+    def _text_history(self, session: Session) -> list:
+        """Plain-text turns of the conversation (no tool calls or results), for Claude's prompt."""
+        out = []
+        for c in session.contents:
+            text = "\n".join(p["text"] for p in c["parts"] if p.get("text") and not p.get("thought")).strip()
+            if text:
+                out.append({"role": "user" if c["role"] == "user" else "assistant", "content": text})
+        return out[-24:]
 
     def _repair(self, session: Session):
         """A stream aborted mid-turn can leave unanswered function calls; answer them so history stays valid."""

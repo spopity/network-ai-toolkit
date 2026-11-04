@@ -3,6 +3,7 @@ import { resetTshoot, streamTshoot } from './api';
 import type { ChatItem, CommandEntry, TshootEvent } from './types';
 
 const STORE_KEY = 'tshoot-chat-v1';
+const MODEL_KEY = 'tshoot-model-v1';
 const MAX_ITEMS = 50;
 const MAX_COMMANDS = 100;
 
@@ -10,6 +11,16 @@ interface Stored {
   sessionId: string;
   items: ChatItem[];
   commands: CommandEntry[];
+}
+
+export type ChatModel = 'claude' | 'gemini';
+
+function loadModel(): ChatModel {
+  try {
+    return localStorage.getItem(MODEL_KEY) === 'gemini' ? 'gemini' : 'claude';
+  } catch {
+    return 'claude';
+  }
 }
 
 const uid = () => Math.random().toString(36).slice(2, 12) + Date.now().toString(36);
@@ -30,6 +41,7 @@ function load(): Stored {
 
 export function useTshootChat() {
   const [state, setState] = useState<Stored>(load);
+  const [model, setModelState] = useState<ChatModel>(loadModel);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState<string[]>([]);
   const abortRef = useRef<AbortController | null>(null);
@@ -143,7 +155,17 @@ export function useTshootChat() {
       .slice(-12)
       .map((i) => ({ role: i.kind, content: i.content }));
     setState((s) => ({ ...s, items: [...s.items, { kind: 'user', id: uid(), content: message }] }));
-    void run('chat', { message, history });
+    void run('chat', { message, history, model });
+  }
+
+  /** Claude answers read-only; Gemini can also propose changes for approval. */
+  function setModel(m: ChatModel) {
+    setModelState(m);
+    try {
+      localStorage.setItem(MODEL_KEY, m);
+    } catch {
+      /* the choice still applies to this tab */
+    }
   }
 
   function decide(approvalId: string, decision: 'approve' | 'reject', note = '') {
@@ -161,5 +183,5 @@ export function useTshootChat() {
     setState({ sessionId: uid(), items: [], commands: [] });
   }
 
-  return { ...state, busy, progress, send, decide, stop, reset };
+  return { ...state, model, setModel, busy, progress, send, decide, stop, reset };
 }

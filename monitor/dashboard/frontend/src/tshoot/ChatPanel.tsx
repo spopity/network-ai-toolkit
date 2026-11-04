@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Bot, Cpu, Loader2, RotateCcw, SendHorizontal, ShieldCheck, Square, Stethoscope, User } from 'lucide-react';
-import type { useTshootChat } from './useTshootChat';
+import { Bot, Cpu, Eye, Loader2, RotateCcw, SendHorizontal, ShieldCheck, Sparkles, Square, Stethoscope, User } from 'lucide-react';
+import type { ChatModel, useTshootChat } from './useTshootChat';
 import { ApprovalCard } from './ApprovalCard';
 
 const SUGGESTIONS = [
@@ -15,11 +15,47 @@ const SUGGESTIONS = [
 type Chat = ReturnType<typeof useTshootChat>;
 
 function ModelBadge({ model }: { model: string }) {
+  const claude = model.startsWith('claude');
   return (
-    <span className="inline-flex items-center gap-1 rounded-full bg-violet-500/10 px-1.5 py-px text-[10px] font-medium text-violet-300">
-      <Cpu size={10} />
+    <span
+      className={`inline-flex items-center gap-1 rounded-full px-1.5 py-px text-[10px] font-medium ${
+        claude ? 'bg-orange-500/10 text-orange-300' : 'bg-violet-500/10 text-violet-300'
+      }`}
+    >
+      {claude ? <Sparkles size={10} /> : <Cpu size={10} />}
       {model}
     </span>
+  );
+}
+
+const MODELS: { id: ChatModel; label: string }[] = [
+  { id: 'claude', label: 'Claude' },
+  { id: 'gemini', label: 'Gemini' },
+];
+
+/** Which model answers the next message. Claude is read-only; Gemini can propose changes. */
+function ModelSelect({ value, onChange, disabled }: { value: ChatModel; onChange: (m: ChatModel) => void; disabled: boolean }) {
+  return (
+    <div role="radiogroup" aria-label="Model" className="flex shrink-0 rounded-lg bg-black/30 p-0.5 ring-1 ring-white/[0.06]">
+      {MODELS.map((m) => (
+        <button
+          key={m.id}
+          role="radio"
+          aria-checked={value === m.id}
+          disabled={disabled}
+          onClick={() => onChange(m.id)}
+          className={`rounded-md px-2 py-1 text-[11px] font-medium transition disabled:opacity-50 ${
+            value === m.id
+              ? m.id === 'claude'
+                ? 'bg-orange-500/15 text-orange-200'
+                : 'bg-violet-500/15 text-violet-200'
+              : 'text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          {m.label}
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -41,6 +77,7 @@ export function ChatPanel({ chat, focusKey }: { chat: Chat; focusKey?: number })
   }
 
   const pending = chat.items.some((i) => i.kind === 'approval' && i.status === 'pending');
+  const readOnly = chat.model === 'claude';
 
   return (
     <div className="flex h-full min-h-0 w-full min-w-0 flex-col">
@@ -55,17 +92,22 @@ export function ChatPanel({ chat, focusKey }: { chat: Chat; focusKey?: number })
               {chat.busy && <span className="rounded-full bg-sky-500/15 px-1.5 py-px text-[10px] font-medium text-sky-300">working</span>}
               {pending && <span className="rounded-full bg-amber-500/15 px-1.5 py-px text-[10px] font-medium text-amber-300">needs approval</span>}
             </h2>
-            <p className="truncate text-[11px] text-slate-500">Reads the router freely · asks before changing anything</p>
+            <p className="truncate text-[11px] text-slate-500">
+              {readOnly ? 'Claude · read-only, never changes anything' : 'Reads the router freely · asks before changing anything'}
+            </p>
           </div>
         </div>
-        <button
-          onClick={chat.reset}
-          title="New conversation"
-          disabled={chat.busy || chat.items.length === 0}
-          className="rounded-lg p-2 text-slate-400 transition hover:bg-white/5 hover:text-white disabled:opacity-40"
-        >
-          <RotateCcw size={17} />
-        </button>
+        <div className="flex shrink-0 items-center gap-1">
+          <ModelSelect value={chat.model} onChange={chat.setModel} disabled={chat.busy} />
+          <button
+            onClick={chat.reset}
+            title="New conversation"
+            disabled={chat.busy || chat.items.length === 0}
+            className="rounded-lg p-2 text-slate-400 transition hover:bg-white/5 hover:text-white disabled:opacity-40"
+          >
+            <RotateCcw size={17} />
+          </button>
+        </div>
       </header>
 
       <div className="min-h-0 flex-1 space-y-4 overflow-y-auto overflow-x-hidden px-4 py-4">
@@ -78,7 +120,11 @@ export function ChatPanel({ chat, focusKey }: { chat: Chat; focusKey?: number })
               </div>
             </div>
             <p className="text-sm text-slate-300">Describe the problem - Tshoot investigates on the router.</p>
-            <p className="mt-1 text-xs text-slate-500">Diagnostics run automatically. Fixes wait for your approval.</p>
+            <p className="mt-1 text-xs text-slate-500">
+              {readOnly
+                ? 'Claude runs diagnostics and recommends fixes. Switch to Gemini to apply one.'
+                : 'Diagnostics run automatically. Fixes wait for your approval.'}
+            </p>
             <div className="mt-5 space-y-2">
               {SUGGESTIONS.map((s) => (
                 <button
@@ -147,8 +193,17 @@ export function ChatPanel({ chat, focusKey }: { chat: Chat; focusKey?: number })
 
       <footer className="border-t border-white/[0.06] p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
         <div className="mb-2 flex items-center gap-2 text-[11px] text-slate-500">
-          <ShieldCheck size={12} className="text-emerald-400" />
-          Safety policy: reads run, changes need approval, factory reset &amp; flash writes blocked
+          {readOnly ? (
+            <>
+              <Eye size={12} className="text-orange-300" />
+              Read-only: Claude can't change the router · switch to Gemini to apply fixes
+            </>
+          ) : (
+            <>
+              <ShieldCheck size={12} className="text-emerald-400" />
+              Safety policy: reads run, changes need approval, factory reset &amp; flash writes blocked
+            </>
+          )}
         </div>
         <div className="flex items-end gap-2 rounded-2xl border border-white/10 bg-black/20 p-1.5 focus-within:border-sky-500/40">
           <textarea

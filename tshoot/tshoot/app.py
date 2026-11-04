@@ -12,6 +12,7 @@ import yaml
 from dotenv import load_dotenv
 from flask import Flask, Response, jsonify, request, stream_with_context
 
+from . import claude_agent
 from .agent import SessionStore, TshootAgent
 from .audit import AuditLog
 from .gemini import Gemini
@@ -86,7 +87,9 @@ def chat():
     session, err = _session_from(body)
     if err:
         return err
-    return _sse(_locked_turn(session, lambda: AGENT.chat(session, message[:4000])))
+    # Claude (read-only) is the default; without a token the chat silently stays on Gemini
+    use_claude = body.get("model", "claude") == "claude" and claude_agent.configured()
+    return _sse(_locked_turn(session, lambda: AGENT.chat(session, message[:4000], use_claude)))
 
 
 @app.post("/api/tshoot/approve")
@@ -116,7 +119,8 @@ def reset():
 @app.get("/api/tshoot/health")
 def health():
     return jsonify({"ok": True, "router": _router.get("name"), "host": _router["host"],
-                    "model": GEMINI.model.replace("models/", "")})
+                    "model": GEMINI.model.replace("models/", ""),
+                    "claude": claude_agent.configured(), "claude_model": claude_agent.model_name()})
 
 
 @app.get("/api/tshoot/audit")
