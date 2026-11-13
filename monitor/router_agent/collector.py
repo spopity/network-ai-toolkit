@@ -55,6 +55,9 @@ MESH_NODES_CMD = "nvram get cfg_device_list"
 # networkmap's cache ({mac: {name, vendor, ...}}, names learned from DHCP/mDNS/NetBIOS)
 CUSTOM_CLIENTLIST_CMD = "nvram get custom_clientlist"
 NETWORKMAP_CMD = "cat /jffs/nmp_cl_json.js 2>/dev/null"
+# IP -> MAC for every network (LAN/Guest/IoT dnsmasq instances), used to name AdGuardHome clients
+ARP_CMD = "cat /proc/net/arp"
+LEASES_CMD = "cat /var/lib/misc/dnsmasq*.leases 2>/dev/null"
 
 COMMAND_GROUPS: Dict[str, List[str]] = {
     "system": [
@@ -98,6 +101,8 @@ COMMAND_GROUPS: Dict[str, List[str]] = {
         MESH_NODES_CMD,
         CUSTOM_CLIENTLIST_CMD,
         NETWORKMAP_CMD,
+        ARP_CMD,
+        LEASES_CMD,
     ],
 }
 

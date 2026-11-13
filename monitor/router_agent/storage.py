@@ -69,6 +69,13 @@ class SnapshotStore:
         for mac in (m.upper() for m in wifi_client_macs(wifi)):
             entry = known.setdefault(mac, {"first_seen": now.isoformat(timespec="seconds"), "baseline": baseline})
             entry["last_seen"] = now.isoformat(timespec="seconds")
+        # remember each device's name/vendor so the AI briefing can name it even after it leaves
+        for c in wifi.get("clients", []):
+            entry = known.get((c.get("mac") or "").upper())
+            if entry is not None:
+                for k in ("name", "vendor"):
+                    if c.get(k):
+                        entry[k] = c[k]
 
         # forget devices unseen for the retention period -- they count as new if they come back
         cutoff = now - timedelta(days=self.retention_days)
@@ -96,6 +103,10 @@ class SnapshotStore:
             seen = datetime.fromtimestamp(f.stat().st_mtime, timezone.utc).isoformat(timespec="seconds")
             for m in wifi_client_macs(wifi):
                 known.setdefault(m.upper(), {"first_seen": seen, "baseline": True})["last_seen"] = seen
+            for c in wifi.get("clients", []):
+                entry = known.get((c.get("mac") or "").upper())
+                if entry is not None:
+                    entry.update({k: c[k] for k in ("name", "vendor") if c.get(k)})
         return known
 
     def prune(self) -> int:

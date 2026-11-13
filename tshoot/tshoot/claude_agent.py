@@ -1,9 +1,11 @@
-"""Read-only chat answers from Claude (Claude Code via the Claude Agent SDK, on the user's subscription).
+"""Chat answers from Claude (Claude Code via the Claude Agent SDK, on the user's subscription).
 
-Claude gets none of Claude Code's built-in tools -- only Tshoot's read-only
-tools, served from an in-process MCP server. Tool names are checked against a
-hard-coded allowlist, so a state-changing tool can never be handed to Claude by
-accident. Without ``CLAUDE_CODE_OAUTH_TOKEN`` in .env the chat stays on Gemini.
+Claude gets none of Claude Code's built-in tools -- only Tshoot's own tools,
+served from an in-process MCP server, with the same access Gemini has: read-only
+diagnostics run freely, and anything state-changing only becomes an approval
+request (TshootAgent decides, via the policy, never the model). Tool names are
+checked against a hard-coded allowlist. Without ``CLAUDE_CODE_OAUTH_TOKEN`` in
+.env the chat stays on Gemini.
 """
 import asyncio
 import json
@@ -27,9 +29,9 @@ EMPTY_CWD = STATE_DIR / "claude-empty"
 SERVER = "tshoot"
 MAX_TURNS = 25
 
-# Tools Claude may ever see. run_command is Tshoot's read-only variant: the agent
-# refuses anything the policy doesn't classify as read (see TshootAgent._handle_call).
-READ_ONLY_TOOLS = {"run_command", "get_monitor_snapshot"}
+# Tools Claude may ever see. State changes never run from a tool call: TshootAgent
+# turns them into an approval request and runs them only after the user approves.
+ALLOWED_TOOLS = {"run_command", "propose_change", "get_monitor_snapshot", "get_dns_lookups", "get_traffic_usage"}
 
 FALLBACK_NOTE = "_Claude was unavailable, so Gemini answered this one._\n\n"
 
@@ -75,17 +77,17 @@ def _prompt(prior_messages: list, question: str) -> str:
 async def _ask(component: str, system_prompt: str, tools: list, call_tool, prior_messages: list, question: str):
     decls = []
     for d in tools:
-        if d["name"] in READ_ONLY_TOOLS:
+        if d["name"] in ALLOWED_TOOLS:
             decls.append(d)
         else:
-            logger.warning("claude: dropping tool %s (not on the read-only allowlist)", d["name"])
+            logger.warning("claude: dropping tool %s (not on the allowlist)", d["name"])
     allowed = [f"mcp__{SERVER}__{d['name']}" for d in decls]
 
     async def can_use_tool(name, _input, _context):
         if name in allowed:
             return PermissionResultAllow()
         logger.warning("claude: denied tool %s", name)
-        return PermissionResultDeny(message="Not available: Tshoot's Claude mode is read-only.")
+        return PermissionResultDeny(message="Not available in Tshoot.")
 
     async def stream():
         yield {"type": "user", "message": {"role": "user", "content": _prompt(prior_messages, question)}}

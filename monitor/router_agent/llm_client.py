@@ -3,6 +3,7 @@ import os
 import re
 import requests
 
+from .devices import name_analysis, snapshot_names
 from .snapshot import wifi_client_macs
 from .summarize import split_by_section, summarize_text
 
@@ -17,11 +18,12 @@ except Exception:
 LOG_FORMAT_NOTE = (
     'Logs are pre-summarized: each "messages" entry is either a one-off {at, message} or a repeated message '
     "template (variable parts as <IP>/<MAC>/N) with count, first/last time and sample values; "
-    '"notable" marks error-like wording.'
+    '"notable" marks error-like wording. "device_names" maps MAC -> device name: whenever you mention a '
+    "device, write its name followed by its MAC in parentheses, e.g. \"Kitchen speaker (AA:BB:CC:DD:EE:FF)\"."
 ).replace("{", "{{").replace("}", "}}")  # survives the str.format() below
 
 SECTION_PROMPTS = {
-    "security": """You are analyzing a home router's security logs and settings (ASUS router running Asuswrt-Merlin). In ONE short paragraph (2-4 sentences, plain text, no markdown), flag only real issues: malware blocks, suspicious or failed logins, exposed configuration, inbound traffic that targets a port the router actually exposes. SSH logins from monitoring_host_ip are this monitoring system itself, not a person. "asus_cloud_service_log" is the router's OWN outbound connection to ASUS's cloud (remote access / ASUS Router app): its "Login failed" entries mean the router failed to log in to ASUS servers -- a connectivity issue, not an attack. "firewall_drops" summarizes logged firewall blocks (Skynet logging is rate-limited, so counts are samples): inbound packets the WAN firewall/Skynet already DROPPED -- background internet scanning is normal and harmless, so only mention it if something stands out (e.g. one source hammering persistently, or a sudden spike). "outbound_blocks" is different and important: a LAN device tried to reach a blocklisted (malware/botnet) address -- always mention it, naming the LAN device IP and how often. If nothing is notable, reply exactly "Nothing notable."
+    "security": """You are analyzing a home router's security logs and settings (ASUS router running Asuswrt-Merlin). In ONE short paragraph (2-4 sentences, plain text, no markdown), flag only real issues: malware blocks, suspicious or failed logins, exposed configuration, inbound traffic that targets a port the router actually exposes. SSH logins from monitoring_host_ip are this monitoring system itself, not a person. "asus_cloud_service_log" is the router's OWN outbound connection to ASUS's cloud (remote access / ASUS Router app): its "Login failed" entries mean the router failed to log in to ASUS servers -- a connectivity issue, not an attack. "firewall_drops" summarizes logged firewall blocks (Skynet logging is rate-limited, so counts are samples): inbound packets the WAN firewall/Skynet already DROPPED -- background internet scanning is normal and harmless, so only mention it if something stands out (e.g. one source hammering persistently, or a sudden spike). "outbound_blocks" is different and important: a LAN device tried to reach a blocklisted (malware/botnet) address -- always mention it, naming the LAN device IP and how often. "dns_filtering_24h" is the router's AdGuardHome DNS filter over the day: blocked lookups are ads/trackers/malware it already stopped (routine unless one device is suddenly far above the others, or a domain looks like malware/C2); "new_domains_by_watched_devices" lists domains a device looked up for the first time ever after at least a day of observation -- mention it only when an IoT or Guest device starts resolving something unrelated to its vendor or purpose. "filter_health_checks" counts the 5-minute DNS health checks by state: any "unfiltered" (AdGuardHome not serving, DNS fell back to unfiltered dnsmasq or protection was off) or "down" (router did not answer DNS) checks must be mentioned with their count. If nothing is notable, reply exactly "Nothing notable."
 
 """ + LOG_FORMAT_NOTE + """
 
@@ -76,7 +78,18 @@ def _is_randomized(mac: str) -> bool:
     return len(mac) > 1 and mac[1].upper() in "26AE"
 
 
-def build_section_data(snapshot: dict, day: dict = None) -> dict:
+_MAC = re.compile(r"\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b")
+
+
+def _with_names(data: dict, names: dict) -> str:
+    """Compact JSON of `data` plus a device_names map for every MAC it mentions."""
+    macs = dict.fromkeys(m.upper().replace("-", ":") for m in _MAC.findall(_compact(data)))
+    if macs:
+        data = {**data, "device_names": {m: names.get(m, "unnamed device") for m in macs}}
+    return _compact(data)
+
+
+def build_section_data(snapshot: dict, day: dict = None, names: dict = None) -> dict:
     """Everything an LLM sees, already summarized: no raw log lines, only
     templated message counts and derived numbers. Returns compact JSON strings.
     `day` is the rendered 24h rollup of the 5-minute checks (rollup.render); when
@@ -86,6 +99,7 @@ def build_section_data(snapshot: dict, day: dict = None) -> dict:
     wan = snapshot.get("wan", {})
     wifi = snapshot.get("wifi", {})
     day = day or {}
+    names = names if names is not None else snapshot_names(snapshot)
     peaks = day.get("peaks") or {}
     drops = day.get("firewall_drops") or sec.get("firewall_drops") or {}
     # older snapshots have no stored summaries -- summarize their raw tails on the fly
@@ -110,6 +124,7 @@ def build_section_data(snapshot: dict, day: dict = None) -> dict:
         "syslog": syslog["security"],
         "web_and_app_logins": sec.get("security_log_summary") or summarize_text(sec.get("security_log_tail", ""), top=8),
         "asus_cloud_service_log": sec.get("aae_log_summary") or summarize_text(sec.get("aae_log_tail", ""), top=6),
+        "dns_filtering_24h": day.get("dns"),
     }
 
     clients = wifi_client_macs(wifi)
@@ -154,7 +169,11 @@ def build_section_data(snapshot: dict, day: dict = None) -> dict:
         "speedtest": wan.get("speedtest"),
         "system_log": syslog["system"],
     }
-    return {"security": _compact(security), "wifi": _compact(wifi_data), "system": _compact(system_data)}
+    return {
+        "security": _with_names(security, names),
+        "wifi": _with_names(wifi_data, names),
+        "system": _with_names(system_data, names),
+    }
 
 
 class GeminiClient:
@@ -234,9 +253,14 @@ class OllamaClient:
 
 
 class LLMRouter:
-    def __init__(self, gemini: GeminiClient, ollama: OllamaClient):
-        self.gemini = gemini
-        self.ollama = ollama
+    """Runs the daily analysis on the first backend that answers every prompt.
+
+    `backends` is an ordered list of (name, client); the order comes from config.yml
+    `llm.order`. A backend that fails part-way is dropped entirely, so one analysis
+    never mixes models."""
+
+    def __init__(self, backends):
+        self.backends = list(backends)
 
     def _run_all_sections(self, backend, section_data: dict) -> dict:
         sections = {}
@@ -249,18 +273,19 @@ class LLMRouter:
         sections["overall"] = _clean_text(backend.analyze(overall_prompt))
         return sections
 
-    def analyze(self, snapshot: dict, day: dict = None) -> dict:
-        section_data = build_section_data(snapshot, day)
-        try:
-            sections = self._run_all_sections(self.gemini, section_data)
-            return {"source": "gemini", "sections": sections}
-        except Exception as gemini_err:
+    def analyze(self, snapshot: dict, day: dict = None, names: dict = None) -> dict:
+        """`names` is {MAC: device name}; every MAC in the output is shown with its name."""
+        names = names if names is not None else snapshot_names(snapshot)
+        section_data = build_section_data(snapshot, day, names)
+        errors = []
+        for name, backend in self.backends:
             try:
-                sections = self._run_all_sections(self.ollama, section_data)
-                return {"source": "ollama", "sections": sections}
-            except Exception as ollama_err:
-                return {
-                    "source": "none",
-                    "error": f"gemini failed ({gemini_err}); ollama failed ({ollama_err})",
-                    "sections": {},
-                }
+                sections = self._run_all_sections(backend, section_data)
+            except Exception as e:
+                errors.append(f"{name} failed ({str(e)[:200]})")
+                continue
+            out = {"source": name, "sections": sections}
+            if errors:
+                out["fallback_reason"] = "; ".join(errors)
+            return name_analysis(out, names)
+        return {"source": "none", "error": "; ".join(errors) or "no LLM backend configured", "sections": {}}

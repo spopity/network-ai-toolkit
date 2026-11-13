@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { C } from './ui';
 
 export interface Series {
@@ -61,9 +61,11 @@ export function AreaChart({ x, series, height = 200, yMin = 0, yMax, formatX, fo
   const [hover, setHover] = useState<number | null>(null);
   const gid = useId().replace(/:/g, '');
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
+    // measure before the first paint, so a chart mounted late never shows at the default width
+    setWidth(Math.max(200, el.clientWidth));
     const ro = new ResizeObserver(([e]) => setWidth(Math.max(200, e.contentRect.width)));
     ro.observe(el);
     return () => ro.disconnect();

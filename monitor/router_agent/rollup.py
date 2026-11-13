@@ -60,7 +60,35 @@ def _empty() -> Dict:
         "drops": {"rows": 0, "window": None, "by_kind": {}, "ports": {}, "sources": {},
                   "outbound_devices": {}, "outbound_dest": {}},
         "stats": {},
+        "dns": {"checks": 0, "queries": 0, "blocked": 0, "by_network": {}, "blocked_domains": {},
+                "blocked_devices": {}, "new_domains": [], "unavailable_checks": 0},
     }
+
+
+MAX_NEW_DOMAINS = 100
+
+
+def _fold_dns(acc: Dict, dns: Optional[Dict]) -> Dict:
+    """Fold one check's AdGuardHome summary (dnslog.summarize) into the day."""
+    if not dns:
+        return acc
+    acc = dict(acc)
+    if dns.get("status"):  # AdGuardHome or the archive was unreachable this check
+        acc["unavailable_checks"] = acc.get("unavailable_checks", 0) + 1
+        return acc
+    acc["checks"] += 1
+    acc["queries"] += dns.get("queries", 0)
+    acc["blocked"] += dns.get("blocked", 0)
+    nets = {k: dict(v) for k, v in acc["by_network"].items()}
+    for net, v in (dns.get("by_network") or {}).items():
+        n = nets.setdefault(net, {"queries": 0, "blocked": 0})
+        n["queries"] += v.get("queries", 0)
+        n["blocked"] += v.get("blocked", 0)
+    acc["by_network"] = nets
+    acc["blocked_domains"] = _merge_counter(acc["blocked_domains"], Counter(dns.get("top_blocked_domains") or {}), MAX_COUNTER_KEYS)
+    acc["blocked_devices"] = _merge_counter(acc["blocked_devices"], Counter(dns.get("top_blocked_devices") or {}), MAX_COUNTER_KEYS)
+    acc["new_domains"] = (acc["new_domains"] + (dns.get("new_domains") or []))[:MAX_NEW_DOMAINS]
+    return acc
 
 
 def _merge_counter(acc: Dict, new: Counter, cap: Optional[int] = None) -> Dict:
@@ -147,6 +175,12 @@ class Rollup:
         roll["syslog"] = merge_groups(roll["syslog"], group_lines(syslog))
         roll["drops"] = _fold_drops(roll["drops"], drops)
         roll["stats"] = _fold_stats(roll["stats"], snapshot)
+        roll["dns"] = _fold_dns(roll.get("dns") or _empty()["dns"], snapshot.get("dns"))
+        health = (snapshot.get("dns_health") or {}).get("state")
+        if health:
+            hc = dict(roll.get("dns_health") or {})
+            hc[health] = hc.get(health, 0) + 1
+            roll["dns_health"] = hc
         roll["checks"] += 1
         roll["until"] = snapshot.get("collected_at")
 
@@ -188,4 +222,29 @@ def render(roll: Dict, skynet_banned: Optional[Dict] = None, top: int = 8) -> Di
             "skynet_banned": skynet_banned,
         },
         "peaks": {k: v for k, v in roll["stats"].items() if not k.startswith("_")},
+        "dns": _render_dns(roll.get("dns"), top, roll.get("dns_health")),
+    }
+
+
+def _render_dns(dns: Optional[Dict], top: int, health: Optional[Dict] = None) -> Optional[Dict]:
+    if not dns or not (dns.get("checks") or dns.get("unavailable_checks")):
+        return {"filter_health_checks": health} if health else None
+    new = dns.get("new_domains") or []
+    # IoT/Guest first: a camera or plug suddenly resolving something new is the interesting signal
+    rank = {"IoT": 0, "Guest": 1}
+    new = sorted(new, key=lambda d: rank.get(d.get("network"), 2))
+    return {
+        "queries": dns["queries"],
+        "blocked": dns["blocked"],
+        "by_network": dns["by_network"],
+        "top_blocked_domains": dict(Counter(dns["blocked_domains"]).most_common(top)),
+        "top_blocked_devices": dict(Counter(dns["blocked_devices"]).most_common(top)),
+        "new_domains_by_watched_devices": [
+            {k: d.get(k) for k in ("device", "network", "domain", "blocked")} for d in new[:25]
+        ],
+        "new_domains_total": len(new),
+        "checks_without_dns_data": dns.get("unavailable_checks", 0),
+        # 5-minute AdGuardHome health checks by state: ok / unfiltered (dnsmasq fallback,
+        # protection off) / down (router not answering DNS)
+        "filter_health_checks": health,
     }

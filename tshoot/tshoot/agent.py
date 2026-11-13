@@ -5,9 +5,10 @@ executions until Gemini answers in plain text, or until a state-changing
 command needs the user's approval -- then the turn ends and the session keeps
 the pending call. ``resume()`` runs (or rejects) it and continues the loop.
 
-With ``use_claude`` a chat turn goes to Claude instead, read-only: no
-propose_change, and run_command only runs commands the policy classifies as
-read. If Claude fails, Gemini answers the turn in the same read-only mode.
+With ``use_claude`` a chat turn goes to Claude instead, with the same tools and
+the same approval flow: a state-changing call becomes the session's pending
+change and Claude ends its turn; after the user decides, the outcome is sent to
+Claude as the next message. If Claude fails, Gemini answers the turn.
 """
 import json
 import logging
@@ -19,11 +20,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterator, Optional
 
+import requests
+
 from . import claude_agent, policy
 from .audit import AuditLog
 from .gemini import Gemini, GeminiError
-from .prompt import (FIX_STEP, FIX_STEP_READ_ONLY, POLICY_RULE, POLICY_RULE_READ_ONLY, READ_ONLY_NOTE,
-                     READ_ONLY_TOOLS, SYSTEM_PROMPT, TOOLS)
+from .prompt import CLAUDE_APPROVAL_NOTE, FIX_STEP, POLICY_RULE, SYSTEM_PROMPT, TOOLS
 from .redact import redact
 from .ssh import CommandResult, RouterShell
 
@@ -44,6 +46,7 @@ class Pending:
     responses: list            # functionResponse parts for the same model turn, None at this call's slot
     slot: int
     details: dict
+    model: str = "gemini"      # who proposed it, and so who continues once the user decides
 
 
 @dataclass
@@ -141,11 +144,11 @@ class TshootAgent:
         router = cfg["router"]
         fmt = dict(router_name=router.get("name", "router"), router_host=router["host"], cmd_timeout=self.cmd_timeout)
         self.system = SYSTEM_PROMPT.format(fix_step=FIX_STEP, policy_rule=POLICY_RULE, **fmt)
-        self.system_read_only = SYSTEM_PROMPT.format(
-            fix_step=FIX_STEP_READ_ONLY, policy_rule=POLICY_RULE_READ_ONLY, **fmt) + READ_ONLY_NOTE
+        self.system_claude = self.system + CLAUDE_APPROVAL_NOTE
         mon = cfg.get("monitor", {})
         self.latest_path = Path(mon.get("latest_json", "/opt/network-ai/logs/latest.json"))
         self.watchdog_path = Path(mon.get("watchdog_status_json", "/opt/network-ai/logs/watchdog_status.json"))
+        self.monitor_api = mon.get("api_url", "http://127.0.0.1:8080").rstrip("/")
 
     # ------------------------------------------------------------ public API
 
@@ -174,6 +177,9 @@ class TshootAgent:
         if not approve:
             parts = self._reject_parts(session, p, note or "Rejected by user.")
             yield {"type": "approval_update", "id": p.id, "status": "rejected"}
+            if p.model == "claude":
+                yield from self._claude_continue(session, parts[0]["text"])
+                return
             session.contents.append({"role": "user", "parts": parts})
             yield from self._loop(session)
             return
@@ -195,6 +201,11 @@ class TshootAgent:
             payload = {"status": "approved_and_executed", **self._result_payload(p.command, result)}
             if note:
                 payload["user_note"] = note
+        if p.model == "claude":
+            yield from self._claude_continue(session, (
+                f"[Outcome of the proposed change `{p.command}`: "
+                f"{json.dumps(payload, ensure_ascii=False, default=str)}]\nContinue: verify the result."))
+            return
         responses = list(p.responses)
         responses[p.slot] = _fn_response(p.call, payload)
         session.contents.append({"role": "user", "parts": responses})
@@ -202,15 +213,31 @@ class TshootAgent:
 
     # ------------------------------------------------------------ loop
 
+    def _claude_continue(self, session: Session, outcome: str) -> Iterator[dict]:
+        """After the user decided on a change Claude proposed: hand Claude the outcome."""
+        prior = self._text_history(session)
+        session.contents.append({"role": "user", "parts": [{"text": outcome}]})
+        yield from self._claude_turn(session, prior, outcome)
+
     def _claude_turn(self, session: Session, prior: list, message: str) -> Iterator[dict]:
-        yield {"type": "status", "content": "Engaging Claude (read-only)…"}
+        yield {"type": "status", "content": "Engaging Claude…"}
         events: queue.Queue = queue.Queue()
 
         def call_tool(name: str, args: dict) -> dict:
             # runs on Claude's tool thread; UI events are relayed through the queue
+            if session.pending and name in ("run_command", "propose_change") and \
+                    policy.classify((args.get("command") or "").strip()).kind == policy.WRITE:
+                return {"status": "skipped", "reason": "Another change is already awaiting the user's approval; "
+                                                       "end your reply now and wait for the decision."}
             payload = None
-            for ev in self._handle_call(session, {"name": name, "args": args}, 0, read_only=True):
-                if isinstance(ev, tuple):
+            for ev in self._handle_call(session, {"name": name, "args": args}, 0):
+                if isinstance(ev, Pending):
+                    ev.model = "claude"
+                    session.pending = ev
+                    payload = {"status": "awaiting_approval", "approval_id": ev.id,
+                               "note": "Not run yet. The user is shown an Approve/Reject card. Make no more tool "
+                                       "calls; end your reply now. The decision and result arrive as the next message."}
+                elif isinstance(ev, tuple):
                     payload = ev[1]["functionResponse"]["response"]
                 elif isinstance(ev, dict):
                     events.put(("event", ev))
@@ -219,7 +246,7 @@ class TshootAgent:
         answer = None
         try:
             for ev in _run_with_heartbeat(
-                    lambda: claude_agent.ask_claude("tshoot_chat", self.system_read_only, READ_ONLY_TOOLS, call_tool,
+                    lambda: claude_agent.ask_claude("tshoot_chat", self.system_claude, TOOLS, call_tool,
                                                     prior, message), "Claude is thinking", events=events):
                 if isinstance(ev, tuple):
                     answer = ev[1]
@@ -227,14 +254,25 @@ class TshootAgent:
                     yield ev
         except Exception as e:
             logger.warning("Claude unavailable, Gemini answers instead: %s", e)
-            yield from self._loop(session, read_only=True, prefix=claude_agent.FALLBACK_NOTE)
+            if session.pending and session.pending.model == "claude":  # proposed, but the turn never finished
+                p, session.pending = session.pending, None
+                self.audit.record("rejected", session.id, p.command, policy.WRITE, decision="dropped",
+                                  note="Claude failed before the proposal was shown")
+            yield from self._loop(session, prefix=claude_agent.FALLBACK_NOTE)
             return
         text, model = answer
+        model = model if model.startswith("claude") else f"claude-{model}"
         session.contents.append({"role": "model", "parts": [{"text": text}]})  # keeps context if the user switches to Gemini
-        yield self._final(text, model=model if model.startswith("claude") else f"claude-{model}")
+        p = session.pending
+        if p and p.model == "claude":
+            yield {"type": "approval", "id": p.id, "command": p.command, **p.details}
+            yield self._final(text or "I'd like to make a change -- please review it below.", model=model,
+                              awaiting_approval=p.id)
+            return
+        yield self._final(text, model=model)
 
-    def _loop(self, session: Session, read_only: bool = False, prefix: str = "") -> Iterator[dict]:
-        system, tools = (self.system_read_only, READ_ONLY_TOOLS) if read_only else (self.system, TOOLS)
+    def _loop(self, session: Session, prefix: str = "") -> Iterator[dict]:
+        system, tools = self.system, TOOLS
         for step in range(MAX_STEPS):
             self._trim(session)
             yield {"type": "status", "content": "Tshoot is analyzing…" if step == 0 else "Reviewing results…"}
@@ -269,7 +307,7 @@ class TshootAgent:
                         "reason": "Another change is already awaiting the user's approval; propose one change at a time."}))
                     continue
                 result_part = None
-                for ev in self._handle_call(session, call, len(responses), read_only):
+                for ev in self._handle_call(session, call, len(responses)):
                     if isinstance(ev, Pending):
                         pending = ev
                     elif isinstance(ev, tuple):
@@ -290,16 +328,20 @@ class TshootAgent:
         yield self._final(prefix + f"I've used {MAX_STEPS} reasoning steps on this without finishing. "
                           "Tell me to continue, or narrow the question.")
 
-    def _handle_call(self, session: Session, call: dict, slot: int, read_only: bool = False) -> Iterator:
+    def _handle_call(self, session: Session, call: dict, slot: int) -> Iterator:
         name = call.get("name")
         args = call.get("args") or {}
 
-        if read_only and name not in {t["name"] for t in READ_ONLY_TOOLS}:
-            yield ("result", _fn_response(call, {"status": "error", "reason": f"{name} is not available in read-only mode"}))
-            return
-
         if name == "get_monitor_snapshot":
             yield ("result", _fn_response(call, self._monitor_snapshot()))
+            return
+
+        if name == "get_dns_lookups":
+            yield ("result", _fn_response(call, self._dns_lookups(args)))
+            return
+
+        if name == "get_traffic_usage":
+            yield ("result", _fn_response(call, self._traffic_usage(args)))
             return
 
         if name not in ("run_command", "propose_change"):
@@ -315,15 +357,6 @@ class TshootAgent:
             yield {"type": "command", "id": uuid.uuid4().hex[:10], "command": command, "kind": verdict.kind,
                    "purpose": purpose, "status": verdict.kind, "reason": verdict.reason}
             yield ("result", _fn_response(call, {"status": verdict.kind, "reason": verdict.reason}))
-            return
-
-        if read_only and verdict.kind == policy.WRITE:
-            self.audit.record(policy.REFUSED, session.id, command, policy.WRITE, reason=f"read-only mode: {verdict.reason}")
-            yield {"type": "command", "id": uuid.uuid4().hex[:10], "command": command, "kind": policy.REFUSED,
-                   "purpose": purpose, "status": policy.REFUSED, "reason": f"read-only mode: {verdict.reason}"}
-            yield ("result", _fn_response(call, {"status": policy.REFUSED, "reason": (
-                f"Not run: read-only mode ({verdict.reason}). Recommend the change to the user instead; they can "
-                "switch the chat model to Gemini to have it applied with an approval.")}))
             return
 
         if name == "run_command" and verdict.kind == policy.WRITE and verdict.opaque:
@@ -397,6 +430,8 @@ class TshootAgent:
     def _reject_parts(self, session: Session, p: Pending, note: str) -> list:
         session.pending = None
         self.audit.record("rejected", session.id, p.command, policy.WRITE, decision="rejected", note=note)
+        if p.model == "claude":  # Claude's history is plain text, not function calls
+            return [{"text": f"[The proposed change `{p.command}` was NOT applied -- rejected by the user: {note}]"}]
         responses = list(p.responses)
         responses[p.slot] = _fn_response(p.call, {"status": "rejected_by_user", "note": note})
         return responses
@@ -435,6 +470,59 @@ class TshootAgent:
                                         and not any("functionResponse" in p for p in c[cut]["parts"])):
             cut += 1
         del c[:cut]
+
+    def _dns_lookups(self, args: dict) -> dict:
+        """Read-only query of network-ai's AdGuardHome archive (its /api/dns/* endpoints)."""
+        params = {"hours": int(args.get("hours") or 24)}
+        for k in ("device", "domain", "network"):
+            if (args.get(k) or "").strip():
+                params[k] = args[k].strip()
+        filtered = any(k in params for k in ("device", "domain")) or args.get("blocked_only") or args.get("new_only")
+        if args.get("blocked_only"):
+            params["blocked"] = 1
+        if args.get("new_only"):
+            params["new"] = 1
+        params["limit"] = max(1, min(int(args.get("limit") or 100), 500))
+        path = "/api/dns/lookups" if filtered else "/api/dns/devices"
+        try:
+            r = requests.get(self.monitor_api + path, params=params, timeout=15)
+            r.raise_for_status()
+            data = r.json()
+        except Exception as e:
+            return {"status": "unavailable", "reason": f"network-ai DNS archive unreachable: {e}"}
+        if not data.get("available"):
+            return {"status": "unavailable", "reason": data.get("error", "archive unavailable")}
+        rows = data.get("lookups") if filtered else data.get("devices")
+        if not filtered:
+            rows = rows[:params["limit"]]
+        return {"status": "ok", "hours": data.get("hours"), "kind": "lookups" if filtered else "devices",
+                "rows": rows, "truncated": len(rows) >= params["limit"]}
+
+    def _traffic_usage(self, args: dict) -> dict:
+        """Read-only query of network-ai's Traffic Analyzer archive (its /api/traffic/* endpoints)."""
+        limit = max(1, min(int(args.get("limit") or 30), 200))
+        params = {"hours": int(args.get("hours") or 24), "limit": limit}
+        for k in ("device", "network"):
+            if (args.get(k) or "").strip():
+                params[k] = args[k].strip()
+        per_device = "device" in params
+        path = "/api/traffic/detail" if per_device else "/api/traffic/devices"
+        try:
+            r = requests.get(self.monitor_api + path, params=params, timeout=15)
+            r.raise_for_status()
+            data = r.json()
+        except Exception as e:
+            return {"status": "unavailable", "reason": f"network-ai traffic archive unreachable: {e}"}
+        if not data.get("available"):
+            return {"status": "unavailable", "reason": data.get("error", "archive unavailable")}
+        if per_device:
+            # drop empty hours so a quiet device doesn't cost hundreds of zero rows
+            series = [s for s in data.get("series") or [] if s.get("rx") or s.get("tx")]
+            return {"status": "ok", "hours": data.get("hours"), "kind": "device", "units": "bytes",
+                    "apps": data.get("apps") or [], "hourly": series}
+        rows = (data.get("devices") or [])[:limit]
+        return {"status": "ok", "hours": data.get("hours"), "kind": "devices", "units": "bytes",
+                "rows": rows, "truncated": len(data.get("devices") or []) > limit}
 
     def _monitor_snapshot(self) -> dict:
         def load(p: Path):

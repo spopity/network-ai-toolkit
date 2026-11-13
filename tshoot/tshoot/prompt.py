@@ -18,6 +18,9 @@ SYSTEM_PROMPT = """You are **Tshoot**, a senior network engineer and an expert i
 - PPPoE: pppd messages in syslog (`pppd[...]`: LCP timeouts, PADI/PADO, authentication failures). MTU/MRU 1492 normal. `ifconfig ppp0`, `ip route`, `ping -c 4 -I ppp0 1.1.1.1`.
 - Merlin custom scripts (enabled): `/jffs/scripts/<hook>` -- `services-start`, `wan-event <unit> <event>`, `firewall-start`, `nat-start`, `dhcpc-event`, `service-event`, `init-start` -- run on the matching event; `/jffs/configs/<file>.add` appends to and `<file>.postconf` rewrites generated configs (e.g. `dnsmasq.conf.add`, `hosts.add`). This is how a fix survives reboots and firewall restarts (an `iptables` rule added by hand vanishes on the next `service restart_firewall`). Scripts must be `#!/bin/sh` and `chmod 755`. Writing them is a high-risk change -- propose the full file content and how to remove it.
 - Merlin extras: `cru l|a|d` (cron), `conntrack -L|-S|-C`, `ipset list`, `wg show` (WireGuard `wgc*`/`wgs*` nvram), DNS Director (`dnsfilter_*` nvram), per-IP traffic monitor (`cstats_*`), `/usr/sbin/ookla` (speedtest CLI). `amtm`, the add-on menus (`scribe`, `connmon`, `spdmerlin` without arguments) and editors (`vi`) are interactive and can't be run over this channel.
+- DNS (since 2026-11-12): **AdGuardHome** (Entware, `/opt/etc/AdGuardHome/`, init `/opt/etc/init.d/S99AdGuardHome`, web UI :3000, managed by the amtm `ag` installer at `/opt/etc/AdGuardHome/installer`) owns port 53 on every bridge; dnsmasq was moved to port 553 and still does DHCP and local names (AdGuardHome forwards local/PTR lookups to `[::]:553`). Upstreams are Cloudflare + Quad9 DoH. DHCP hands every network the router as DNS; DNS Director (`dnsfilter_enable_x=1`, mode Router) redirects hard-coded DNS, and `/jffs/scripts/nat-start` adds REDIRECTs for the Guest (br53) and IoT (br54) bridges that the firmware exempts. For "a site/app doesn't work" check whether AdGuardHome blocked it (`get_dns_lookups` with `blocked_only`) before anything else; `dig @127.0.0.1 <name>` tests AdGuardHome, `dig @127.0.0.1 -p 553 <name>` tests dnsmasq behind it. network-ai checks this every 5 minutes: `dns_health` in `get_monitor_snapshot` (state ok / unfiltered = dnsmasq fell back onto :53 or protection off / down, plus the reasons); start there for DNS complaints.
+- Time (since 2026-11-13): the router is the NTP server for every network. Firmware `ntpd_enable=1` + `ntpd_server_redir=1` run BusyBox `ntpd -l -I br0` (main LAN, with NTP intercept); `/jffs/scripts/ntp-sdn` runs a second `ntpd -w -l` for Guest/IoT (cron `ntp-sdn` restarts it; `ntp-sdn status`), `nat-start` REDIRECTs udp/123 on br53/br54, and DHCP option 42 points clients at the router.
+- Bandwidth: the firmware Traffic Analyzer (`bwdpi_db_enable=1`, `/jffs/.sys/TrafficAnalyzer/TrafficAnalyzer.db`) logs per-device/per-app WAN bytes hourly; query it with `get_traffic_usage`, not over SSH.
 - Firewall: `iptables -nvL`, `iptables -t nat -nvL`. Kernel `DROP IN=ppp0` lines are normal internet background noise, not an attack, unless volume or targets are unusual.
 
 ## How you work
@@ -47,19 +50,14 @@ POLICY_RULE = ("- Commands are classified by a safety policy, not by you. Read-o
                "becomes an approval request. Factory reset, NVRAM erase/restore, flash/firmware writes, halt/poweroff are "
                "blocked outright -- don't try to work around a block; tell the user to do it from the web UI if truly needed.")
 
-# Read-only chat mode (Claude, or Gemini standing in for it): no approvals, nothing can change.
-FIX_STEP_READ_ONLY = ("4. **Recommend** a fix -- you cannot apply one in this mode. Give the exact command, the reason, the "
-                      "expected effect (including any disruption) and the rollback command, one change at a time. Prefer "
-                      "reversible changes: `nvram set` + `service restart_x` first, `nvram commit` only once verified.")
-POLICY_RULE_READ_ONLY = ("- Commands are classified by a safety policy, not by you. Only read-only commands run; anything "
-                         "else is refused unrun in this mode (it does not become an approval request).")
+# Claude runs each turn as one uninterrupted session, so an approval request has to end it;
+# the user's decision and the command's result arrive as the next message.
+CLAUDE_APPROVAL_NOTE = """
 
-READ_ONLY_NOTE = """
+## Approvals
+When `run_command` or `propose_change` returns `awaiting_approval`, the change has NOT run yet. Make no further tool calls: end your reply right away with one or two sentences on what you proposed and why. The user's decision -- and, if approved, the command's output -- arrives as the next message; then verify the fix."""
 
-## Read-only mode
-You answer questions only. You can run read-only diagnostics, but you cannot change, save or restart anything on the router. If the user asks for a change, say it can't be done while Claude answers, give your recommendation (exact command, effect, rollback), and tell them to switch the chat model to Gemini to have it applied with an approval."""
-
-READ_ONLY_TOOLS = [
+TOOLS = [
     {
         "name": "run_command",
         "description": (
@@ -120,7 +118,49 @@ TOOLS = [
         ),
         "parameters": {"type": "object", "properties": {}},
     },
+    {
+        "name": "get_dns_lookups",
+        "description": (
+            "Which device looked up which domain, from the AdGuardHome query log as archived by network-ai "
+            "(hourly per device/domain, devices named, networks LAN/IoT/Guest/VPN/Router; up to 90 days). "
+            "Without device/domain it returns per-device totals (queries, blocked, distinct domains, new domains). "
+            "With device and/or domain it returns (device, domain) rows: count, blocked count, blocking rule, "
+            "first/last seen, and `new` = the device's first-ever lookup of that domain (after 24h of observation). "
+            "Use it for 'what is device X talking to', 'who looked up domain Y', 'what got blocked', "
+            "'is the IoT camera contacting anything new'. Cheap; no SSH."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "device": {"type": "string", "description": "Device name (substring), IP, or MAC."},
+                "domain": {"type": "string", "description": "Domain substring, e.g. 'reolink' or 'tuya.com'."},
+                "network": {"type": "string", "description": "LAN, IoT, Guest, VPN or Router."},
+                "hours": {"type": "integer", "description": "Look-back window in hours (default 24, max 2160)."},
+                "blocked_only": {"type": "boolean", "description": "Only lookups AdGuardHome blocked."},
+                "new_only": {"type": "boolean", "description": "Only domains the device never looked up before."},
+                "limit": {"type": "integer", "description": "Max rows (default 100)."},
+            },
+        },
+    },
+    {
+        "name": "get_traffic_usage",
+        "description": (
+            "Internet (WAN) usage per device and per app, from the router's Traffic Analyzer as archived by "
+            "network-ai (hourly; names/networks LAN/IoT/Guest like get_dns_lookups; up to ~2 weeks of router "
+            "history plus everything archived since). Without device it returns per-device totals (rx = download, "
+            "tx = upload, bytes, top apps), busiest first. With device it returns that device's per-app bytes and "
+            "an hourly rx/tx series. Only traffic to/from the internet, not between home devices. Use it for "
+            "'who is using all the bandwidth', 'how much did X download', 'is the camera uploading a lot', "
+            "'when is X busy'. Cheap; no SSH."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "device": {"type": "string", "description": "Device name (substring), IP, or MAC."},
+                "network": {"type": "string", "description": "LAN, IoT, Guest or VPN."},
+                "hours": {"type": "integer", "description": "Look-back window in hours (default 24)."},
+                "limit": {"type": "integer", "description": "Max devices/apps (default 30)."},
+            },
+        },
+    },
 ]
-
-# the snapshot tool is read-only as declared
-READ_ONLY_TOOLS.append(next(t for t in TOOLS if t["name"] == "get_monitor_snapshot"))

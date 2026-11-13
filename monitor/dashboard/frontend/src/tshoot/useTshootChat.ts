@@ -158,7 +158,7 @@ export function useTshootChat() {
     void run('chat', { message, history, model });
   }
 
-  /** Claude answers read-only; Gemini can also propose changes for approval. */
+  /** Which model answers; both can diagnose and propose changes for approval. */
   function setModel(m: ChatModel) {
     setModelState(m);
     try {

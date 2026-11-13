@@ -1,0 +1,79 @@
+#!/bin/sh
+# Asuswrt-Merlin hook: /jffs/scripts/update-notification
+# Called by the router's own scheduled firmware check (Administration -> Firmware
+# Upgrade -> "Scheduled new firmware check") when a newer firmware is available.
+# It ONLY sends an email -- it never downloads or flashes anything.
+# Mail goes through amtm's email settings (amtm -> em); without them it just logs.
+# Sends once per new version. Test: /jffs/scripts/update-notification --test
+# Source of truth: /opt/network-ai/router/update-notification (install: see README).
+
+CONF=/jffs/addons/amtm/mail/email.conf
+PWFILE=/jffs/addons/amtm/mail/emailpw.enc
+STATE=/jffs/addons/update-notification.last
+
+log() { logger -t update-notification "$*"; }
+
+model="$(nvram get productid)"
+current="$(nvram get firmver | tr -d .).$(nvram get buildno).$(nvram get extendno)"   # same format as $new
+new="$(nvram get webs_state_info | sed 's/_/./g')"
+test=false
+[ "$1" = "--test" ] && test=true
+
+if ! $test; then
+    [ -n "$new" ] || exit 0
+    [ "$(cat "$STATE" 2>/dev/null)" = "$new" ] && exit 0   # already told about this version
+fi
+
+if [ ! -f "$CONF" ] || [ ! -f "$PWFILE" ]; then
+    log "new firmware $new available (installed $current) -- no email: amtm email not set up (amtm -> em)"
+    exit 0
+fi
+FROM_NAME="" TO_NAME="" FROM_ADDRESS="" TO_ADDRESS="" FRIENDLY_ROUTER_NAME=""
+USERNAME="" emailPwEnc="" SMTP="" PORT="" PROTOCOL="" SSL_FLAG=""
+. "$CONF"
+if [ -z "$TO_ADDRESS" ] || [ -z "$FROM_ADDRESS" ] || [ -z "$SMTP" ] || [ -z "$PORT" ] || [ -z "$PROTOCOL" ]; then
+    log "new firmware $new available (installed $current) -- no email: amtm email settings incomplete"
+    exit 0
+fi
+pw="$(openssl aes-256-cbc $emailPwEnc -d -in "$PWFILE" -pass pass:ditbabot,isoi 2>/dev/null)"
+[ -n "$pw" ] || { log "could not decrypt the amtm email password"; exit 1; }
+
+name="${FRIENDLY_ROUTER_NAME:-$model}"
+if $test; then
+    subject="Test: firmware update notifications from $name"
+    body="This is a test. When the router's scheduled firmware check finds a new Asuswrt-Merlin release, you'll get an email like this. Nothing is installed automatically.
+
+Installed firmware: $current"
+else
+    subject="New firmware available for $name: $new"
+    body="The router's scheduled firmware check found a new Asuswrt-Merlin release.
+
+Router:    $name ($model)
+Installed: $current
+Available: $new
+
+Nothing has been downloaded or installed. Release notes: https://www.asuswrt-merlin.net/changelog
+Update manually from Administration -> Firmware Upgrade when you're ready."
+fi
+
+msg=/tmp/update-notification.$$
+{
+    echo "From: \"${FROM_NAME:-$name}\" <$FROM_ADDRESS>"
+    echo "To: \"${TO_NAME:-$TO_ADDRESS}\" <$TO_ADDRESS>"
+    echo "Subject: $subject"
+    echo "Date: $(date -R)"
+    echo "Content-Type: text/plain; charset=UTF-8"
+    echo
+    echo "$body"
+} > "$msg"
+
+if curl -sS --retry 3 --retry-delay 5 --connect-timeout 30 --max-time 60 \
+        --url "${PROTOCOL}://${SMTP}:${PORT}" --user "${USERNAME}:${pw}" \
+        --mail-from "$FROM_ADDRESS" --mail-rcpt "$TO_ADDRESS" \
+        --upload-file "$msg" $SSL_FLAG --ssl-reqd --crlf 2>/tmp/update-notification.err; then
+    $test || echo "$new" > "$STATE"
+    log "emailed $TO_ADDRESS: $subject"
+else
+    log "email failed: $(tail -c 200 /tmp/update-notification.err)"
+fi
+rm -f "$msg" /tmp/update-notification.err

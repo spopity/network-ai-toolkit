@@ -1,0 +1,11 @@
+[Unit]
+Description=Back up the router daily (keeps 14)
+
+[Timer]
+# UTC = 04:40 CET / 05:40 CEST on the router: after the 03:00 UTC LLM run and spdMerlin's 04:12 local speedtest
+OnCalendar=*-*-* 03:40:00
+Persistent=true
+Unit=router-backup.service
+
+[Install]
+WantedBy=timers.target

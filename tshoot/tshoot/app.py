@@ -87,7 +87,7 @@ def chat():
     session, err = _session_from(body)
     if err:
         return err
-    # Claude (read-only) is the default; without a token the chat silently stays on Gemini
+    # Claude is the default (same tools and approvals as Gemini); without a token the chat silently stays on Gemini
     use_claude = body.get("model", "claude") == "claude" and claude_agent.configured()
     return _sse(_locked_turn(session, lambda: AGENT.chat(session, message[:4000], use_claude)))
 

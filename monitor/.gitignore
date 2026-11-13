@@ -9,3 +9,4 @@ config.yml
 .pytest_cache/
 *.log
 *.code-workspace
+state/

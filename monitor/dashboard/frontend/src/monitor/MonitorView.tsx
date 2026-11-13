@@ -25,6 +25,8 @@ import type { DashboardState, HistoryResponse, MeshNode, Snapshot, WatchdogEvent
 import { AreaChart, Legend } from '../components/AreaChart';
 import { C, Card, Meter, Pill, Segmented, Skeleton, StatTile, TONE, type Tone } from '../components/ui';
 import { useConnmon } from '../hooks/useConnmon';
+import { DnsCard } from './DnsCard';
+import { TrafficCard } from './TrafficCard';
 import { clock, compact, dayClock, duration, isRandomMac, relTime } from '../lib/format';
 
 interface Props {
@@ -37,6 +39,8 @@ interface Props {
 }
 
 const NOTHING = /^nothing notable\.?$/i;
+
+const SOURCE_LABEL: Record<string, string> = { claude: 'Claude', gemini: 'Gemini', ollama: 'Ollama (local)' };
 
 export function MonitorView({ data, history, error, collecting, onCollect, onAsk }: Props) {
   const snap = data?.snapshot ?? null;
@@ -69,6 +73,8 @@ export function MonitorView({ data, history, error, collecting, onCollect, onAsk
         <WifiCard snap={snap} finding={data?.analysis?.sections?.wifi} />
         <RouterCard snap={snap} />
       </div>
+      <TrafficCard onAsk={onAsk} />
+      <DnsCard onAsk={onAsk} health={snap?.dns_health} />
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3 lg:items-start">
         <TrendsCard className="lg:col-span-2" history={history} />
         <EventsCard data={data!} history={history} />
@@ -263,7 +269,7 @@ function Briefing({
 
       <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <p className="truncate text-[11px] text-slate-500">
-          Daily analysis {relTime(analysis?.analyzed_at ?? snap.collected_at)} · via {analysis?.source === 'ollama' ? 'Ollama (local fallback)' : analysis?.source === 'gemini' ? 'Gemini' : '—'} ·
+          Daily analysis {relTime(analysis?.analyzed_at ?? snap.collected_at)} · via {SOURCE_LABEL[analysis?.source ?? ''] ?? '—'} ·
           24h of 5-min checks summarized
         </p>
         <div className="flex shrink-0 gap-2">
@@ -782,6 +788,18 @@ function describe(e: Ev): { label: string; sub?: string; tone: Tone; icon: typeo
     case 'restart_result':
       return { label: d.ok ? 'WAN restart succeeded' : 'WAN restart failed', tone: d.ok ? 'ok' : 'high', icon: Power };
     default:
+      if (e.event.startsWith('dns_')) {
+        const st = e.event.slice('dns_'.length);
+        const problems = Array.isArray(d.problems) ? (d.problems as string[]) : [];
+        if (st === 'ok')
+          return { label: 'DNS filtering restored', sub: d.previous ? `was ${String(d.previous)}` : undefined, tone: 'ok', icon: ShieldCheck };
+        return {
+          label: st === 'down' ? 'DNS not answering' : 'DNS unfiltered (AdGuardHome not serving)',
+          sub: problems[0],
+          tone: st === 'down' ? 'high' : 'caution',
+          icon: ShieldAlert,
+        };
+      }
       if (e.event.startsWith('router_wan_')) {
         const kind = e.event.slice('router_wan_'.length);
         const tone: Tone = kind === 'connected' ? 'ok' : kind === 'disconnected' || kind === 'stopped' ? 'high' : 'info';

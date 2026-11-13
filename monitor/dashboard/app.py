@@ -19,6 +19,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
 from router_agent import db
+from router_agent.devices import device_names, name_analysis
 from router_agent.events import append_router_event, read_router_events
 from router_agent.collector import CONNMON_DB, SSHCollector
 CONFIG_PATH = Path(os.getenv("NETWORK_AI_CONFIG", BASE_DIR / "config.yml"))
@@ -118,7 +119,8 @@ def api_state():
 
     return jsonify({
         "snapshot": latest.get("snapshot"),
-        "analysis": latest.get("analysis"),
+        # older briefings cited bare MACs: always show each device's name alongside
+        "analysis": name_analysis(latest.get("analysis"), device_names(ld, latest.get("snapshot"))),
         "watchdog": watchdog_status,
         "watchdog_events": events[:30],
     })
@@ -160,6 +162,61 @@ def api_history():
     except Exception as e:
         # degrade gracefully -- history is an archival nice-to-have, not load-bearing
         return jsonify({"snapshots": [], "watchdog_events": [], "available": False, "error": str(e)})
+
+
+def _dns_args():
+    hours = max(1, min(request.args.get("hours", default=24, type=int), 24 * 90))
+    blank = lambda k: (request.args.get(k) or "").strip() or None  # noqa: E731
+    return hours, blank
+
+
+@app.route("/api/dns/devices")
+def api_dns_devices():
+    """Per-device DNS totals from the AdGuardHome archive (?hours=24&network=IoT)."""
+    hours, arg = _dns_args()
+    try:
+        return jsonify({"available": True, "hours": hours, "devices": db.get_dns_devices(hours, arg("network"))})
+    except Exception as e:
+        return jsonify({"available": False, "hours": hours, "devices": [], "error": str(e)})
+
+
+@app.route("/api/dns/lookups")
+def api_dns_lookups():
+    """Which device looked up what (?hours=24&device=<name|ip|mac|key>&domain=<substring>
+    &network=IoT&blocked=1&new=1&limit=200). Used by the dashboard and Tshoot."""
+    hours, arg = _dns_args()
+    flag = lambda k: request.args.get(k, "").lower() in ("1", "true", "yes")  # noqa: E731
+    limit = max(1, min(request.args.get("limit", default=200, type=int), 1000))
+    try:
+        rows = db.get_dns_lookups(hours, device=arg("device"), domain=arg("domain"), network=arg("network"),
+                                  blocked_only=flag("blocked"), new_only=flag("new"), limit=limit)
+        return jsonify({"available": True, "hours": hours, "lookups": rows})
+    except Exception as e:
+        return jsonify({"available": False, "hours": hours, "lookups": [], "error": str(e)})
+
+
+@app.route("/api/traffic/devices")
+def api_traffic_devices():
+    """Per-device internet usage from the Traffic Analyzer archive (?hours=24&network=IoT)."""
+    hours, arg = _dns_args()
+    try:
+        return jsonify({"available": True, "hours": hours, "devices": db.get_traffic_devices(hours, arg("network"))})
+    except Exception as e:
+        return jsonify({"available": False, "hours": hours, "devices": [], "error": str(e)})
+
+
+@app.route("/api/traffic/detail")
+def api_traffic_detail():
+    """Apps + hourly series (?hours=24&device=<mac|ip|name>&network=IoT&limit=50); no device = everything.
+    Used by the dashboard and Tshoot."""
+    hours, arg = _dns_args()
+    limit = max(1, min(request.args.get("limit", default=50, type=int), 200))
+    try:
+        apps = db.get_traffic_apps(hours, device=arg("device"), network=arg("network"), limit=limit)
+        series = db.get_traffic_series(min(hours, 24 * 31), device=arg("device"), network=arg("network"))
+        return jsonify({"available": True, "hours": hours, "apps": apps, "series": series})
+    except Exception as e:
+        return jsonify({"available": False, "hours": hours, "apps": [], "series": [], "error": str(e)})
 
 
 CONNMON_CACHE_SECONDS = 120  # connmon writes a new row every 5 min; don't SSH on every page poll

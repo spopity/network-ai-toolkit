@@ -108,6 +108,22 @@ export interface Snapshot {
   wan: WanInfo;
   security: SecurityInfo;
   wifi: WifiInfo;
+  dns_health?: DnsHealth;
+}
+
+/** 5-minute AdGuardHome health check (router_agent/dnshealth.py). */
+export interface DnsHealth {
+  state: 'ok' | 'unfiltered' | 'down';
+  problems: string[];
+  checked_at: string;
+  since?: string;
+  owners_53?: string[] | null;
+  supervisor?: number | null;
+  agh_running?: boolean | null;
+  protection?: boolean | null;
+  agh_version?: string | null;
+  blocking_test?: boolean | null;
+  probe_ms?: number | null;
 }
 
 export interface AnalysisSections {
@@ -119,7 +135,8 @@ export interface AnalysisSections {
 }
 
 export interface Analysis {
-  source: 'gemini' | 'ollama' | 'none';
+  source: 'claude' | 'gemini' | 'ollama' | 'none';
+  fallback_reason?: string;
   sections?: AnalysisSections;
   error?: string;
   // the analysis runs once a day; 5-minute checks carry it forward

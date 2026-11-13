@@ -1,0 +1,65 @@
+#!/bin/sh
+# Local NTP server for the SDN networks (Guest br53, IoT br54).
+#
+# The firmware's own NTP server (Advanced > Administration > System >
+# "Enable local NTP server", nvram ntpd_enable=1 + ntpd_server_redir=1) runs
+# BusyBox ntpd with "-l -I br0", so it only answers on the main LAN. This
+# starts a second, unbound BusyBox ntpd that answers everything else on :123.
+# It runs with -w, so it never touches the clock (the firmware instance keeps
+# doing that). The br53/br54 intercept REDIRECTs live in /jffs/scripts/nat-start.
+#
+# Install: /jffs/scripts/ntp-sdn, started from services-start; "check" runs
+# every 10 min from cron and restarts it if it died.
+
+TAG="ntp-sdn"
+PIDFILE=/var/run/ntp-sdn.pid
+
+peers() {
+	for v in ntp_server0 ntp_server1; do
+		s=$(nvram get $v)
+		[ -n "$s" ] && printf -- '-p %s ' "$s"
+	done
+}
+
+running() {
+	[ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null
+}
+
+start() {
+	running && return 0
+	# -w implies -n (foreground), so background it ourselves.
+	# shellcheck disable=SC2046
+	/usr/sbin/ntpd -w -l $(peers) </dev/null >/dev/null 2>&1 &
+	echo $! > "$PIDFILE"
+	logger -t "$TAG" "started (pid $!)"
+}
+
+stop() {
+	if running; then
+		kill "$(cat "$PIDFILE")"
+		logger -t "$TAG" "stopped"
+	fi
+	rm -f "$PIDFILE"
+}
+
+case "$1" in
+	start)
+		start
+		cru a ntp-sdn "*/10 * * * * /jffs/scripts/ntp-sdn check"
+		;;
+	stop)
+		cru d ntp-sdn
+		stop
+		;;
+	restart) stop; start ;;
+	check)
+		if ! running; then
+			logger -t "$TAG" "not running, restarting"
+			start
+		fi
+		;;
+	status)
+		if running; then echo "running (pid $(cat "$PIDFILE"))"; else echo "stopped"; exit 1; fi
+		;;
+	*) echo "usage: $0 start|stop|restart|check|status"; exit 2 ;;
+esac

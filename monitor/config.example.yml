@@ -12,6 +12,14 @@ retention_days: 14          # daily (LLM-analyzed) records
 check_retention_hours: 48   # 5-minute check records (gzipped, logs/checks/)
 
 llm:
+  # tried in this order; the first backend that answers every prompt writes the
+  # whole analysis (a backend that fails part-way is skipped, never mixed)
+  order: [claude, gemini, ollama]
+  claude:
+    # Claude Code subscription via the Claude Agent SDK, like Tshoot's chat;
+    # needs CLAUDE_CODE_OAUTH_TOKEN in .env (`claude setup-token`), skipped without it
+    model: opus
+    timeout: 180
   gemini:
     # GEMINI_API_KEY / GEMINI_MODEL / USE_GCP_GEMINI read from .env
     timeout: 20
@@ -32,3 +40,26 @@ watchdog:
 dashboard:
   host: 0.0.0.0
   port: 8080
+
+# Optional: AdGuardHome on the router. Per-device DNS lookups are pulled every
+# 5-minute check (router_agent/dnslog.py) and archived in Postgres.
+# adguard:
+#   url: http://192.168.1.1:3000
+#   credentials_file: /root/.config/adguardhome.cred   # lines: username=... / password=...
+#   networks:            # client IP prefix -> network label
+#     "192.168.1.": LAN
+#     "192.168.52.": Guest
+#     "192.168.107.": IoT
+#   aliases:             # client IP -> name, for hosts the router only knows by vendor
+#     "192.168.1.10": my-server
+
+# Optional: per-device internet usage from the firmware's Traffic Analyzer
+# (Traffic Analyzer > Statistic must be on). Read every 5-minute check
+# (router_agent/traffic.py) and archived in Postgres. `true` reuses the adguard
+# networks/aliases; or give them here as a mapping.
+# traffic_analyzer: true
+
+# Optional: never archive or show these DNS domains (and subdomains) / Traffic Analyzer apps.
+# hidden:
+#   domains: [example.com]
+#   apps: [SomeApp]

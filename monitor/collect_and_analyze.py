@@ -18,8 +18,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from router_agent.collector import SSHCollector
+from router_agent.devices import device_names
+from router_agent.dnshealth import DnsHealth
+from router_agent.dnslog import DnsLog
 from router_agent.snapshot import build_snapshot
+from router_agent.traffic import TrafficLog
 from router_agent.llm_client import GeminiClient, OllamaClient, LLMRouter
+from router_agent.claude_client import ClaudeClient
 from router_agent.rollup import Rollup, render as render_rollup
 from router_agent.storage import SnapshotStore
 from router_agent.events import read_router_events, watchdog_summary
@@ -60,15 +65,20 @@ def main():
     router_llm = None
     if args.mode == "daily":
         llm_cfg = cfg.get("llm", {})
-        gemini_cfg = llm_cfg.get("gemini", {})
-        ollama_cfg = llm_cfg.get("ollama", {})
-        gemini = GeminiClient(timeout=gemini_cfg.get("timeout", 20))
-        ollama = OllamaClient(
-            url=ollama_cfg.get("url", "http://127.0.0.1:11434"),
-            model=ollama_cfg.get("model", "llama3"),
-            timeout=ollama_cfg.get("timeout", 30),
-        )
-        router_llm = LLMRouter(gemini, ollama)
+        backends = []
+        for b in llm_cfg.get("order") or ["gemini", "ollama"]:
+            bcfg = llm_cfg.get(b) or {}
+            if b == "claude":
+                if ClaudeClient.configured():
+                    backends.append((b, ClaudeClient(model=bcfg.get("model", "opus"), timeout=bcfg.get("timeout", 180))))
+            elif b == "gemini":
+                backends.append((b, GeminiClient(timeout=bcfg.get("timeout", 20))))
+            elif b == "ollama":
+                if bcfg.get("url") and bcfg.get("model"):  # no guessed defaults: set both in config.yml
+                    backends.append((b, OllamaClient(url=bcfg["url"], model=bcfg["model"], timeout=bcfg.get("timeout", 180))))
+            else:
+                print(f"warning: unknown llm backend {b!r} in llm.order, ignored", file=sys.stderr)
+        router_llm = LLMRouter(backends)
 
     exit_code = 0
     for r in cfg.get("routers", []):
@@ -90,6 +100,19 @@ def main():
         snapshot = build_snapshot(name, r["host"], grouped)
         snapshot["collector_ip"] = local_ip_towards(r["host"])
         snapshot["wifi"]["new_clients"] = store.track_clients(snapshot["wifi"])
+        hidden = cfg.get("hidden") or {}  # never archived: DNS domains (+ subdomains), Traffic Analyzer apps
+        if cfg.get("adguard"):
+            # per-device DNS lookups from AdGuardHome (archived in Postgres; summary only here)
+            dnslog = DnsLog(store.base, {**cfg["adguard"], "hide_domains": hidden.get("domains")})
+            snapshot["dns"] = dnslog.collect(snapshot, grouped)
+            # is DNS answered, and filtered by an active AdGuardHome? (state changes -> events)
+            snapshot["dns_health"] = DnsHealth(store.base, r["host"], dnslog._client()).check(collector)
+        if cfg.get("traffic_analyzer"):
+            # per-device internet usage from the firmware's Traffic Analyzer (archived in Postgres)
+            tcfg = {**{k: v for k, v in (cfg.get("adguard") or {}).items() if k in ("networks", "aliases")},
+                    **(cfg["traffic_analyzer"] if isinstance(cfg["traffic_analyzer"], dict) else {}),
+                    "hide_apps": hidden.get("apps")}
+            snapshot["traffic"] = TrafficLog(store.base, tcfg).collect(collector, snapshot, grouped)
         snapshot["wan"]["watchdog_24h"] = watchdog_summary(store.base, since_hours=24)
         snapshot["wan"]["router_events_24h"] = [
             {k: e.get(k) for k in ("ts", "event", "state", "ip")}
@@ -102,7 +125,7 @@ def main():
 
         if router_llm:
             day = render_rollup(roll, skynet_banned=(snapshot["security"].get("firewall_drops") or {}).get("skynet_banned"))
-            analysis = router_llm.analyze(snapshot, day)
+            analysis = router_llm.analyze(snapshot, day, names=device_names(store.base, snapshot))
             analysis["analyzed_at"] = snapshot["collected_at"]
             analysis["window"] = [day["since"], day["until"]]
             record = {"snapshot": snapshot, "analysis": analysis, "day_summary": day}

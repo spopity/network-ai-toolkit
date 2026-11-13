@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Bot, Cpu, Eye, Loader2, RotateCcw, SendHorizontal, ShieldCheck, Sparkles, Square, Stethoscope, User } from 'lucide-react';
+import { Bot, Cpu, Loader2, RotateCcw, SendHorizontal, ShieldCheck, Sparkles, Square, Stethoscope, User } from 'lucide-react';
 import type { ChatModel, useTshootChat } from './useTshootChat';
 import { ApprovalCard } from './ApprovalCard';
 
@@ -33,7 +33,7 @@ const MODELS: { id: ChatModel; label: string }[] = [
   { id: 'gemini', label: 'Gemini' },
 ];
 
-/** Which model answers the next message. Claude is read-only; Gemini can propose changes. */
+/** Which model answers the next message. Both have the same access: reads run, changes need approval. */
 function ModelSelect({ value, onChange, disabled }: { value: ChatModel; onChange: (m: ChatModel) => void; disabled: boolean }) {
   return (
     <div role="radiogroup" aria-label="Model" className="flex shrink-0 rounded-lg bg-black/30 p-0.5 ring-1 ring-white/[0.06]">
@@ -77,7 +77,6 @@ export function ChatPanel({ chat, focusKey }: { chat: Chat; focusKey?: number })
   }
 
   const pending = chat.items.some((i) => i.kind === 'approval' && i.status === 'pending');
-  const readOnly = chat.model === 'claude';
 
   return (
     <div className="flex h-full min-h-0 w-full min-w-0 flex-col">
@@ -93,7 +92,7 @@ export function ChatPanel({ chat, focusKey }: { chat: Chat; focusKey?: number })
               {pending && <span className="rounded-full bg-amber-500/15 px-1.5 py-px text-[10px] font-medium text-amber-300">needs approval</span>}
             </h2>
             <p className="truncate text-[11px] text-slate-500">
-              {readOnly ? 'Claude · read-only, never changes anything' : 'Reads the router freely · asks before changing anything'}
+              Reads the router freely · asks before changing anything
             </p>
           </div>
         </div>
@@ -121,9 +120,7 @@ export function ChatPanel({ chat, focusKey }: { chat: Chat; focusKey?: number })
             </div>
             <p className="text-sm text-slate-300">Describe the problem - Tshoot investigates on the router.</p>
             <p className="mt-1 text-xs text-slate-500">
-              {readOnly
-                ? 'Claude runs diagnostics and recommends fixes. Switch to Gemini to apply one.'
-                : 'Diagnostics run automatically. Fixes wait for your approval.'}
+              Diagnostics run automatically. Fixes wait for your approval.
             </p>
             <div className="mt-5 space-y-2">
               {SUGGESTIONS.map((s) => (
@@ -193,17 +190,8 @@ export function ChatPanel({ chat, focusKey }: { chat: Chat; focusKey?: number })
 
       <footer className="border-t border-white/[0.06] p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
         <div className="mb-2 flex items-center gap-2 text-[11px] text-slate-500">
-          {readOnly ? (
-            <>
-              <Eye size={12} className="text-orange-300" />
-              Read-only: Claude can't change the router · switch to Gemini to apply fixes
-            </>
-          ) : (
-            <>
-              <ShieldCheck size={12} className="text-emerald-400" />
-              Safety policy: reads run, changes need approval, factory reset &amp; flash writes blocked
-            </>
-          )}
+          <ShieldCheck size={12} className="text-emerald-400" />
+          Safety policy: reads run, changes need approval, factory reset &amp; flash writes blocked
         </div>
         <div className="flex items-end gap-2 rounded-2xl border border-white/10 bg-black/20 p-1.5 focus-within:border-sky-500/40">
           <textarea

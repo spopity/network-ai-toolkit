@@ -1,0 +1,10 @@
+[Unit]
+Description=Router backup - pull /jffs, the USB stick and NVRAM settings over SSH
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh /opt/network-ai/router/backup.sh
+User=root
+Nice=10
