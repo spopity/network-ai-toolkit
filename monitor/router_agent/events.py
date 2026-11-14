@@ -7,9 +7,8 @@ to the watchdog's events -- JSONL file as the source of truth, Postgres
 `watchdog_events` table as the best-effort archive.
 """
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import List
 
 from . import db
 
@@ -22,12 +21,12 @@ def append_router_event(log_dir: Path, event: dict):
     db.insert_watchdog_event(event)
 
 
-def read_router_events(log_dir: Path, limit: int = 20, since_hours: float = None) -> List[dict]:
+def read_router_events(log_dir: Path, limit: int = 20, since_hours: float | None = None) -> list[dict]:
     """Most recent first."""
     path = Path(log_dir) / ROUTER_EVENTS_FILE
     if not path.exists():
         return []
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=since_hours) if since_hours else None
+    cutoff = datetime.now(UTC) - timedelta(hours=since_hours) if since_hours else None
     events = []
     for line in reversed(path.read_text().splitlines()):
         try:
@@ -45,7 +44,7 @@ def read_router_events(log_dir: Path, limit: int = 20, since_hours: float = None
 def watchdog_summary(log_dir: Path, since_hours: float = 24, watchdog_log: str = "watchdog.log") -> dict:
     """Outages the LAN-side watchdog measured in the window: count, total/longest downtime, auto-restarts."""
     path = Path(log_dir) / watchdog_log
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=since_hours)
+    cutoff = datetime.now(UTC) - timedelta(hours=since_hours)
     downtimes, restarts = [], 0
     if path.exists():
         for line in path.read_text().splitlines()[-2000:]:

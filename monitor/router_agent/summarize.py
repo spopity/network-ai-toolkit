@@ -10,13 +10,13 @@ survive the top-N cut.
 """
 import re
 from collections import OrderedDict
-from typing import Dict, Iterable, List
+from collections.abc import Iterable
 
 # "Oct 11 20:05:09 proc[123]: msg" (syslogd) / "Oct 11 20:05:09 RT-AX88U proc[123]: msg" (syslog-ng/scribe)
 _SYSLOG_LINE = re.compile(
     r"^(?P<ts>\w{3} [ \d]\d \d\d:\d\d:\d\d) (?:[\w.-]+ (?=[^:\s]+(?:\[\d+\])?: ))?(?P<proc>[^:\[\s]+)(?:\[\d+\])?: (?P<msg>.*)$"
 )
-_MONTHS = {m: i for i, m in enumerate("Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split())}
+_MONTHS = {m: i for i, m in enumerate(["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"])}
 
 
 def _ts_key(ts: str):
@@ -65,14 +65,14 @@ def _parse(line: str):
     return None, None, line
 
 
-def summarize_lines(lines: Iterable[str], top: int = 15, example_len: int = 140, values: int = 4) -> Dict:
+def summarize_lines(lines: Iterable[str], top: int = 15, example_len: int = 140, values: int = 4) -> dict:
     return render_groups(group_lines(lines, example_len, values), top=top)
 
 
-def group_lines(lines: Iterable[str], example_len: int = 140, values: int = 4) -> Dict:
+def group_lines(lines: Iterable[str], example_len: int = 140, values: int = 4) -> dict:
     """Template-count lines without truncating: {"lines", "window", "groups": [...]}.
     Group lists from successive log windows can be merged (merge_groups) and rendered later."""
-    groups: "OrderedDict[tuple, Dict]" = OrderedDict()
+    groups: OrderedDict[tuple, dict] = OrderedDict()
     total = 0
     first_ts = last_ts = None
     for raw in lines:
@@ -127,7 +127,7 @@ def _later(a, b):
     return a if _ts_key(a) >= _ts_key(b) else b
 
 
-def merge_groups(acc: Dict, new: Dict, values: int = 4, max_groups: int = 600) -> Dict:
+def merge_groups(acc: dict, new: dict, values: int = 4, max_groups: int = 600) -> dict:
     """Fold one group_lines() result into an accumulated one (same shape)."""
     by_key = {(g["source"], g["template"]): g for g in acc.get("groups", [])}
     for g in new.get("groups", []):
@@ -147,12 +147,12 @@ def merge_groups(acc: Dict, new: Dict, values: int = 4, max_groups: int = 600) -
     return {"lines": acc.get("lines", 0) + new.get("lines", 0), "window": window, "groups": merged}
 
 
-def render_groups(grouped: Dict, top: int = 15) -> Dict:
+def render_groups(grouped: dict, top: int = 15) -> dict:
     """Ranked, truncated LLM-ready summary of a group_lines()/merge_groups() result."""
     groups = grouped.get("groups", [])
     ranked = sorted(groups, key=lambda g: (not g["notable"], -g["count"]))
     notable_lines = sum(g["count"] for g in groups if g["notable"])
-    out: List[Dict] = []
+    out: list[dict] = []
     for g in ranked[:top]:
         g = dict(g)
         vals = g.pop("values")
@@ -184,7 +184,7 @@ def render_groups(grouped: Dict, top: int = 15) -> Dict:
     }
 
 
-def summarize_text(text: str, **kw) -> Dict:
+def summarize_text(text: str, **kw) -> dict:
     return summarize_lines((text or "").splitlines(), **kw)
 
 
@@ -194,7 +194,7 @@ SECURITY_SOURCES = {"dropbear", "sshd", "HTTPD", "httpd", "LOGIN", "BWDPI", "bwd
                     "custom_script", "openvpn", "ovpn-server1", "ovpn-server2", "charon", "wireguard"}
 
 
-def split_by_section(summary: Dict, per_section: int = 10) -> Dict[str, Dict]:
+def split_by_section(summary: dict, per_section: int = 10) -> dict[str, dict]:
     """Split a syslog summary's messages into {"security", "wifi", "system"} sub-summaries."""
     out = {name: [] for name in ("security", "wifi", "system")}
     for m in summary.get("messages", []):

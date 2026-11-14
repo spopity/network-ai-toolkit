@@ -11,9 +11,8 @@ a fresh one. Nothing here calls an LLM.
 import json
 import re
 from collections import Counter
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 from .collector import FIREWALL_DROPS_CMD, SYSLOG_TAIL_CMD
 from .snapshot import _out
@@ -23,7 +22,7 @@ _TS = re.compile(r"^(\w{3} [ \d]\d \d\d:\d\d:\d\d)")
 MAX_COUNTER_KEYS = 1000  # internet scanners alone can be thousands of IPs a day; keep the heaviest
 
 
-def _line_time(line: str, now: datetime) -> Optional[datetime]:
+def _line_time(line: str, now: datetime) -> datetime | None:
     m = _TS.match(line)
     if not m:
         return None
@@ -35,7 +34,7 @@ def _line_time(line: str, now: datetime) -> Optional[datetime]:
     return t.replace(year=t.year - 1) if t > now + timedelta(days=1) else t
 
 
-def new_lines(lines: List[str], cursor: Optional[Dict]) -> Tuple[List[str], Optional[Dict]]:
+def new_lines(lines: list[str], cursor: dict | None) -> tuple[list[str], dict | None]:
     """Lines newer than the cursor, and the cursor to store for next time.
     The cursor is the newest timestamp seen plus the lines carrying it (several
     lines can share a second). Lines without a timestamp are ignored."""
@@ -52,9 +51,9 @@ def new_lines(lines: List[str], cursor: Optional[Dict]) -> Tuple[List[str], Opti
     return fresh, {"ts": newest.isoformat(), "lines": [ln for t, ln in dated if t == newest][-50:]}
 
 
-def _empty() -> Dict:
+def _empty() -> dict:
     return {
-        "since": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "since": datetime.now(UTC).isoformat(timespec="seconds"),
         "checks": 0,
         "syslog": {"lines": 0, "window": None, "groups": []},
         "drops": {"rows": 0, "window": None, "by_kind": {}, "ports": {}, "sources": {},
@@ -68,7 +67,7 @@ def _empty() -> Dict:
 MAX_NEW_DOMAINS = 100
 
 
-def _fold_dns(acc: Dict, dns: Optional[Dict]) -> Dict:
+def _fold_dns(acc: dict, dns: dict | None) -> dict:
     """Fold one check's AdGuardHome summary (dnslog.summarize) into the day."""
     if not dns:
         return acc
@@ -91,12 +90,12 @@ def _fold_dns(acc: Dict, dns: Optional[Dict]) -> Dict:
     return acc
 
 
-def _merge_counter(acc: Dict, new: Counter, cap: Optional[int] = None) -> Dict:
+def _merge_counter(acc: dict, new: Counter, cap: int | None = None) -> dict:
     c = Counter(acc) + new
     return dict(c.most_common(cap)) if cap else dict(c)
 
 
-def _fold_drops(acc: Dict, rows_raw: List[str]) -> Dict:
+def _fold_drops(acc: dict, rows_raw: list[str]) -> dict:
     rows = [line.split("|") for line in rows_raw if line.count("|") == 5]
     if not rows:
         return acc
@@ -120,7 +119,7 @@ def _fold_drops(acc: Dict, rows_raw: List[str]) -> Dict:
     }
 
 
-def _fold_stats(stats: Dict, snapshot: Dict) -> Dict:
+def _fold_stats(stats: dict, snapshot: dict) -> dict:
     s = dict(stats)
     system, wan, wifi = snapshot.get("system", {}), snapshot.get("wan", {}), snapshot.get("wifi", {})
 
@@ -160,10 +159,10 @@ class Rollup:
         except (OSError, ValueError):
             return default
 
-    def load(self) -> Dict:
+    def load(self) -> dict:
         return self._read(self.path, None) or _empty()
 
-    def update(self, grouped_results: Dict[str, List[Dict]], snapshot: Dict) -> Dict:
+    def update(self, grouped_results: dict[str, list[dict]], snapshot: dict) -> dict:
         """Fold one check into the rollup; returns the updated rollup."""
         roll = self.load()
         cursor = self._read(self.cursor_path, {})
@@ -197,10 +196,10 @@ class Rollup:
         self.path.write_text(json.dumps(roll, separators=(",", ":")))
 
 
-def render(roll: Dict, skynet_banned: Optional[Dict] = None, top: int = 8) -> Dict:
+def render(roll: dict, skynet_banned: dict | None = None, top: int = 8) -> dict:
     """The rollup in the shapes the LLM section builders use for a single snapshot."""
     d = roll["drops"]
-    top_of = lambda c, n=top: Counter(c).most_common(n)  # noqa: E731
+    top_of = lambda c, n=top: Counter(c).most_common(n)
     return {
         "since": roll.get("since"),
         "until": roll.get("until"),
@@ -226,7 +225,7 @@ def render(roll: Dict, skynet_banned: Optional[Dict] = None, top: int = 8) -> Di
     }
 
 
-def _render_dns(dns: Optional[Dict], top: int, health: Optional[Dict] = None) -> Optional[Dict]:
+def _render_dns(dns: dict | None, top: int, health: dict | None = None) -> dict | None:
     if not dns or not (dns.get("checks") or dns.get("unavailable_checks")):
         return {"filter_health_checks": health} if health else None
     new = dns.get("new_domains") or []

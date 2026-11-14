@@ -20,9 +20,8 @@ import random
 import socket
 import struct
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Dict, List, Optional
 
 PROBE_NAME = "example.com"
 BLOCK_TEST = "doubleclick.net"  # in AdGuard DNS filter; check_host only, never resolved
@@ -36,7 +35,7 @@ ROUTER_CMD = (
 )
 
 
-def dns_probe(server: str, name: str = PROBE_NAME, timeout: float = 3.0) -> Dict:
+def dns_probe(server: str, name: str = PROBE_NAME, timeout: float = 3.0) -> dict:
     """One A query over UDP. -> {"ok", "ms", "rcode", "answers"} or {"ok": False, "error"}."""
     qid = random.randint(0, 0xFFFF)
     qname = b"".join(bytes([len(p)]) + p.encode() for p in name.split(".")) + b"\0"
@@ -60,7 +59,7 @@ def dns_probe(server: str, name: str = PROBE_NAME, timeout: float = 3.0) -> Dict
         s.close()
 
 
-def parse_router(out: str) -> Dict:
+def parse_router(out: str) -> dict:
     owners, agh_pid, monitors = [], None, None
     for line in out.splitlines():
         line = line.strip()
@@ -78,9 +77,9 @@ def parse_router(out: str) -> Dict:
     return {"owners_53": sorted(set(owners)), "agh_pid": agh_pid, "monitors": monitors}
 
 
-def evaluate(router: Optional[Dict], api: Optional[Dict], blocking: Optional[bool], probe: Dict) -> Dict:
+def evaluate(router: dict | None, api: dict | None, blocking: bool | None, probe: dict) -> dict:
     """Pure decision logic (unit-testable)."""
-    problems: List[str] = []
+    problems: list[str] = []
     if not probe.get("ok"):
         why = probe.get("error") or f"rcode {probe.get('rcode')}, {probe.get('answers', 0)} answers"
         problems.append(f"router does not answer DNS ({why})")
@@ -122,7 +121,7 @@ class DnsHealth:
         self.router_ip = router_ip
         self.client = adguard_client
 
-    def check(self, collector) -> Dict:
+    def check(self, collector) -> dict:
         try:
             router = parse_router(collector.run_command(ROUTER_CMD, timeout=20)["out"])
         except Exception:
@@ -135,12 +134,12 @@ class DnsHealth:
                 api = self.client._get("status")
                 hit = self.client._get("filtering/check_host", name=BLOCK_TEST)
                 blocking = str(hit.get("reason", "")).startswith("FilteredBlack")
-            except Exception:
+            except Exception:  # noqa: S110 -- AdGuard unreachable: evaluate() treats None as down
                 pass
         probe = dns_probe(self.router_ip)
         result = evaluate(router, api, blocking, probe)
         result.update({
-            "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "checked_at": datetime.now(UTC).isoformat(timespec="seconds"),
             "owners_53": (router or {}).get("owners_53"),
             "supervisor": (router or {}).get("monitors"),
             "agh_running": (api or {}).get("running"),
@@ -152,7 +151,7 @@ class DnsHealth:
         self._record_transition(result)
         return result
 
-    def _record_transition(self, result: Dict) -> None:
+    def _record_transition(self, result: dict) -> None:
         from .events import append_router_event
 
         path = self.base / STATE_FILE

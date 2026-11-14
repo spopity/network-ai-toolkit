@@ -1,6 +1,7 @@
 import json
 import os
 import re
+
 import requests
 
 from .devices import name_analysis, snapshot_names
@@ -8,8 +9,8 @@ from .snapshot import wifi_client_macs
 from .summarize import split_by_section, summarize_text
 
 try:
-    from google.oauth2 import service_account
     from google.auth.transport.requests import Request as GoogleRequest
+    from google.oauth2 import service_account
     GCP_AVAILABLE = True
 except Exception:
     GCP_AVAILABLE = False
@@ -89,7 +90,7 @@ def _with_names(data: dict, names: dict) -> str:
     return _compact(data)
 
 
-def build_section_data(snapshot: dict, day: dict = None, names: dict = None) -> dict:
+def build_section_data(snapshot: dict, day: dict | None = None, names: dict | None = None) -> dict:
     """Everything an LLM sees, already summarized: no raw log lines, only
     templated message counts and derived numbers. Returns compact JSON strings.
     `day` is the rendered 24h rollup of the 5-minute checks (rollup.render); when
@@ -177,7 +178,7 @@ def build_section_data(snapshot: dict, day: dict = None, names: dict = None) -> 
 
 
 class GeminiClient:
-    def __init__(self, api_key: str = None, api_url: str = None, timeout: int = 20):
+    def __init__(self, api_key: str | None = None, api_url: str | None = None, timeout: int = 20):
         self.api_key = api_key or os.getenv("GEMINI_API_KEY")
         self.api_url = api_url or os.getenv("GEMINI_API_URL")
         self.timeout = timeout
@@ -273,7 +274,7 @@ class LLMRouter:
         sections["overall"] = _clean_text(backend.analyze(overall_prompt))
         return sections
 
-    def analyze(self, snapshot: dict, day: dict = None, names: dict = None) -> dict:
+    def analyze(self, snapshot: dict, day: dict | None = None, names: dict | None = None) -> dict:
         """`names` is {MAC: device name}; every MAC in the output is shown with its name."""
         names = names if names is not None else snapshot_names(snapshot)
         section_data = build_section_data(snapshot, day, names)

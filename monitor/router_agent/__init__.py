@@ -1,1 +1,1 @@
-__all__ = ["collector", "logger", "gemini_client", "agent"]
+__all__ = ["agent", "collector", "gemini_client", "logger"]

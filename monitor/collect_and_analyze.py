@@ -17,17 +17,19 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from router_agent.claude_client import ClaudeClient
 from router_agent.collector import SSHCollector
 from router_agent.devices import device_names
 from router_agent.dnshealth import DnsHealth
 from router_agent.dnslog import DnsLog
-from router_agent.snapshot import build_snapshot
-from router_agent.traffic import TrafficLog
-from router_agent.llm_client import GeminiClient, OllamaClient, LLMRouter
-from router_agent.claude_client import ClaudeClient
-from router_agent.rollup import Rollup, render as render_rollup
-from router_agent.storage import SnapshotStore
 from router_agent.events import read_router_events, watchdog_summary
+from router_agent.llm_client import GeminiClient, LLMRouter, OllamaClient
+from router_agent.netmap import lan_snapshot, parse_services
+from router_agent.rollup import Rollup
+from router_agent.rollup import render as render_rollup
+from router_agent.snapshot import build_snapshot
+from router_agent.storage import SnapshotStore
+from router_agent.traffic import TrafficLog
 
 
 def local_ip_towards(host: str):
@@ -59,7 +61,7 @@ def main():
     )
     # one run at a time: the 03:00 daily run, the 5-minute timer and the dashboard's
     # "Check now" all share the rollup and its log cursor
-    lock = open(store.base / ".run.lock", "w")
+    lock = open(store.base / ".run.lock", "w")  # noqa: SIM115 -- held for the whole run
     fcntl.flock(lock, fcntl.LOCK_EX)
 
     router_llm = None
@@ -100,6 +102,9 @@ def main():
         snapshot = build_snapshot(name, r["host"], grouped)
         snapshot["collector_ip"] = local_ip_towards(r["host"])
         snapshot["wifi"]["new_clients"] = store.track_clients(snapshot["wifi"])
+        # network map: wired topology, DHCP/ARP hosts and the router's services (dashboard only, never sent to an LLM)
+        snapshot["lan"] = lan_snapshot(grouped, snapshot)
+        snapshot["services"] = parse_services(grouped)
         hidden = cfg.get("hidden") or {}  # never archived: DNS domains (+ subdomains), Traffic Analyzer apps
         if cfg.get("adguard"):
             # per-device DNS lookups from AdGuardHome (archived in Postgres; summary only here)

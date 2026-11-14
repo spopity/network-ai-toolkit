@@ -2,9 +2,8 @@ import gzip
 import json
 import logging
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from datetime import datetime, timedelta, timezone
-from typing import List, Optional
 
 from . import db
 from .snapshot import wifi_client_macs
@@ -28,7 +27,7 @@ class SnapshotStore:
         self.check_retention_hours = check_retention_hours
 
     def write(self, router_name: str, record: dict, kind: str = "daily") -> Path:
-        ts = datetime.now(timezone.utc).isoformat(timespec="seconds").replace(":", "-")
+        ts = datetime.now(UTC).isoformat(timespec="seconds").replace(":", "-")
         body = json.dumps(record, indent=2)
         if kind == "check":
             path = self.checks / f"{router_name}-{ts}.json.gz"
@@ -54,12 +53,12 @@ class SnapshotStore:
         except (OSError, ValueError):
             return {}
 
-    def track_clients(self, wifi: dict) -> Optional[List[str]]:
+    def track_clients(self, wifi: dict) -> list[str] | None:
         """Record the current wifi clients in known_clients.json and return those first
         seen within NEW_CLIENT_WINDOW (None when there is no history yet to compare to).
         Only mesh-wide snapshots are tracked: older ones saw just the main router's radios."""
         path = self.base / "known_clients.json"
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         try:
             known = json.loads(path.read_text())
             baseline = False
@@ -100,7 +99,7 @@ class SnapshotStore:
                 continue
             if "nodes" not in wifi:
                 continue
-            seen = datetime.fromtimestamp(f.stat().st_mtime, timezone.utc).isoformat(timespec="seconds")
+            seen = datetime.fromtimestamp(f.stat().st_mtime, UTC).isoformat(timespec="seconds")
             for m in wifi_client_macs(wifi):
                 known.setdefault(m.upper(), {"first_seen": seen, "baseline": True})["last_seen"] = seen
             for c in wifi.get("clients", []):

@@ -5,13 +5,20 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import requests
 import yaml
 from dotenv import load_dotenv
-from flask import Flask, Response, jsonify, request, send_from_directory, stream_with_context
+from flask import (
+    Flask,
+    Response,
+    jsonify,
+    request,
+    send_from_directory,
+    stream_with_context,
+)
 
 load_dotenv()
 
@@ -19,9 +26,11 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
 from router_agent import db
+from router_agent.collector import CONNMON_DB, SSHCollector
 from router_agent.devices import device_names, name_analysis
 from router_agent.events import append_router_event, read_router_events
-from router_agent.collector import CONNMON_DB, SSHCollector
+from router_agent.netmap import build_map
+
 CONFIG_PATH = Path(os.getenv("NETWORK_AI_CONFIG", BASE_DIR / "config.yml"))
 COLLECT_SCRIPT = BASE_DIR / "collect_and_analyze.py"
 FRONTEND_DIST = Path(__file__).resolve().parent / "frontend" / "dist"
@@ -67,7 +76,7 @@ def _run_collect_background():
     lp = _lock_path()
     started_at = read_json(lp).get("started_at") if read_json(lp) else None
     try:
-        proc = subprocess.run(
+        proc = subprocess.run(  # noqa: PLW1510 -- returncode checked below
             [sys.executable, str(COLLECT_SCRIPT), "--config", str(CONFIG_PATH)],
             cwd=str(BASE_DIR),
             capture_output=True,
@@ -80,7 +89,7 @@ def _run_collect_background():
         lp.unlink(missing_ok=True)
         _last_result_path().write_text(json.dumps({
             "started_at": started_at,
-            "finished_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "finished_at": datetime.now(UTC).isoformat(timespec="seconds"),
             "result": result,
         }))
 
@@ -143,7 +152,7 @@ def api_router_event():
         return jsonify({"error": "missing event"}), 400
 
     event = {
-        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "ts": datetime.now(UTC).isoformat(timespec="seconds"),
         "event": f"router_wan_{kind}",
         "source": "router",
         **{k: str(body[k])[:64] for k in ROUTER_EVENT_FIELDS if k in body},
@@ -166,7 +175,7 @@ def api_history():
 
 def _dns_args():
     hours = max(1, min(request.args.get("hours", default=24, type=int), 24 * 90))
-    blank = lambda k: (request.args.get(k) or "").strip() or None  # noqa: E731
+    blank = lambda k: (request.args.get(k) or "").strip() or None
     return hours, blank
 
 
@@ -185,7 +194,7 @@ def api_dns_lookups():
     """Which device looked up what (?hours=24&device=<name|ip|mac|key>&domain=<substring>
     &network=IoT&blocked=1&new=1&limit=200). Used by the dashboard and Tshoot."""
     hours, arg = _dns_args()
-    flag = lambda k: request.args.get(k, "").lower() in ("1", "true", "yes")  # noqa: E731
+    flag = lambda k: request.args.get(k, "").lower() in ("1", "true", "yes")
     limit = max(1, min(request.args.get("limit", default=200, type=int), 1000))
     try:
         rows = db.get_dns_lookups(hours, device=arg("device"), domain=arg("domain"), network=arg("network"),
@@ -217,6 +226,16 @@ def api_traffic_detail():
         return jsonify({"available": True, "hours": hours, "apps": apps, "series": series})
     except Exception as e:
         return jsonify({"available": False, "hours": hours, "apps": [], "series": [], "error": str(e)})
+
+
+@app.route("/api/network-map")
+def api_network_map():
+    """Every device on the network with its room, type, brand and link to a mesh node,
+    plus the router's services -- built from the latest 5-minute check (no SSH here)."""
+    ld = log_dir()
+    snap = (read_json(ld / "latest.json") or {}).get("snapshot")
+    known = read_json(ld / "known_clients.json") or {}
+    return jsonify(build_map(snap, known if isinstance(known, dict) else {}, load_config()))
 
 
 CONNMON_CACHE_SECONDS = 120  # connmon writes a new row every 5 min; don't SSH on every page poll
@@ -268,7 +287,7 @@ def api_collect_now():
             return jsonify({"status": "already_running", "started_at": started_at}), 409
         # stale lock from a watcher thread that died (e.g. dashboard restart mid-run) -- self-heal
 
-    started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    started_at = datetime.now(UTC).isoformat(timespec="seconds")
     lp.write_text(json.dumps({"pid": os.getpid(), "started_at": started_at, "started_ts": time.time()}))
 
     threading.Thread(target=_run_collect_background, daemon=True).start()

@@ -63,3 +63,13 @@ dashboard:
 # hidden:
 #   domains: [example.com]
 #   apps: [SomeApp]
+
+# Optional: the dashboard's network map (Map tab) places devices in rooms by their name
+# ("kitchen_Google-Home-Mini" -> Kitchen); phones/laptops go to Mobile, servers to Server,
+# washer/dryer/boiler to Utility, mesh nodes to the room most of their devices are in.
+# Pin anything here by device name, IP or MAC (case-insensitive).
+# network_map:
+#   rooms:
+#     RT-AX52: Shed
+#     "192.168.1.10": Server
+#     Samsung-Washer: Bathroom

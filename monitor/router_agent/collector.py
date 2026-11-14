@@ -1,7 +1,5 @@
-import paramiko
-import socket
-from typing import Dict, List
 
+import paramiko
 
 # Log layout. With scribe (syslog-ng on the USB stick) the main log is
 # /opt/var/log/messages (/jffs/syslog.log symlinks to it), firewall drops and
@@ -58,8 +56,26 @@ NETWORKMAP_CMD = "cat /jffs/nmp_cl_json.js 2>/dev/null"
 # IP -> MAC for every network (LAN/Guest/IoT dnsmasq instances), used to name AdGuardHome clients
 ARP_CMD = "cat /proc/net/arp"
 LEASES_CMD = "cat /var/lib/misc/dnsmasq*.leases 2>/dev/null"
+# what runs on the router, for the network map's service legend: one "key=value" per line
+# (proc_* = process alive, nv_* = firmware setting, cron = amtm add-on jobs, wg = WireGuard
+# server peers as "wgpeer=<n>|<name>|<addr>" and "wgdump=<allowed-ips>|<last handshake epoch>")
+SERVICES_CMD = (
+    "for p in AdGuardHome syslog-ng minidlna smbd avahi-daemon pppd dropbear httpds; do "
+    'pidof $p >/dev/null && echo "proc_$p=1" || echo "proc_$p=0"; done; '
+    'echo "now=$(date +%s)"; '
+    'echo "dnsmasq=$(pidof dnsmasq | wc -w)"; '
+    "echo \"ntp_main=$(ps w | grep -c '[n]tp -t')\"; "
+    "echo \"ntp_sdn=$(ps w | grep -c '[n]tpd -w -l')\"; "
+    'echo "skynet=$(iptables -t raw -S PREROUTING 2>/dev/null | grep -c Skynet)"; '
+    "echo \"cron=$(cru l | sed -n 's/.*#\\(.*\\)#$/\\1/p' | tr '\\n' ',')\"; "
+    "for k in wgs_enable ntpd_enable le_enable bwdpi_db_enable wrs_protect_enable wrs_mals_enable "
+    'enable_samba dms_enable qos_enable qos_type; do echo "nv_$k=$(nvram get $k)"; done; '
+    "for i in 1 2 3 4 5 6 7 8 9 10; do n=$(nvram get wgs1_c${i}_name); "
+    '[ -n "$n" ] && echo "wgpeer=$i|$n|$(nvram get wgs1_c${i}_addr)|$(nvram get wgs1_c${i}_enable)"; done; '
+    "wg show wgs1 dump 2>/dev/null | tail -n +2 | awk '{print \"wgdump=\"$4\"|\"$5}'"
+)
 
-COMMAND_GROUPS: Dict[str, List[str]] = {
+COMMAND_GROUPS: dict[str, list[str]] = {
     "system": [
         "nvram get productid",
         "nvram get firmver",
@@ -104,11 +120,14 @@ COMMAND_GROUPS: Dict[str, List[str]] = {
         ARP_CMD,
         LEASES_CMD,
     ],
+    "services": [
+        SERVICES_CMD,
+    ],
 }
 
 
 class SSHCollector:
-    def __init__(self, host: str, port: int = 22, username: str = None, password: str = None, key_filename: str = None, timeout: int = 10):
+    def __init__(self, host: str, port: int = 22, username: str | None = None, password: str | None = None, key_filename: str | None = None, timeout: int = 10):
         self.host = host
         self.port = port
         self.username = username
@@ -120,27 +139,24 @@ class SSHCollector:
     def connect(self):
         self.client = paramiko.SSHClient()
         self.client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        try:
-            self.client.connect(self.host, port=self.port, username=self.username, password=self.password, key_filename=self.key_filename, timeout=self.timeout)
-        except (socket.error, paramiko.SSHException):
-            raise
+        self.client.connect(self.host, port=self.port, username=self.username, password=self.password, key_filename=self.key_filename, timeout=self.timeout)
 
     def close(self):
         if self.client:
             self.client.close()
             self.client = None
 
-    def run_command(self, cmd: str, timeout: int = 30) -> Dict:
+    def run_command(self, cmd: str, timeout: int = 30) -> dict:
         if not self.client:
             self.connect()
-        stdin, stdout, stderr = self.client.exec_command(cmd, timeout=timeout)
+        _stdin, stdout, stderr = self.client.exec_command(cmd, timeout=timeout)
         out = stdout.read().decode(errors="ignore")
         err = stderr.read().decode(errors="ignore")
         return {"cmd": cmd, "out": out, "err": err}
 
-    def collect_grouped(self, command_groups: Dict[str, List[str]] = None) -> Dict[str, List[Dict]]:
+    def collect_grouped(self, command_groups: dict[str, list[str]] | None = None) -> dict[str, list[dict]]:
         groups = command_groups or COMMAND_GROUPS
-        results: Dict[str, List[Dict]] = {}
+        results: dict[str, list[dict]] = {}
         try:
             for category, commands in groups.items():
                 category_results = []

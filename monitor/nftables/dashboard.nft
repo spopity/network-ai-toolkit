@@ -1,0 +1,11 @@
+# network-ai dashboard (:8080) - reachable only via Tailscale, localhost (tshoot) and the router (wan-event hook)
+table inet dashboard
+delete table inet dashboard
+table inet dashboard {
+	chain input {
+		type filter hook input priority filter - 1; policy accept;
+		tcp dport 8080 iifname { "lo", "tailscale0" } accept
+		tcp dport 8080 ip saddr 192.168.1.1 accept   # your router
+		tcp dport 8080 counter drop
+	}
+}

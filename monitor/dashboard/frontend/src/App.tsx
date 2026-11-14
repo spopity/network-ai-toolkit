@@ -1,21 +1,22 @@
 import { useEffect, useState } from 'react';
-import { LayoutDashboard, MessageSquare, PanelRightClose, PanelRightOpen, RefreshCw, Router as RouterIcon, Stethoscope, Terminal } from 'lucide-react';
+import { LayoutDashboard, Map as MapIcon, MessageSquare, PanelRightClose, PanelRightOpen, RefreshCw, Router as RouterIcon, Stethoscope, Terminal } from 'lucide-react';
 import { useDashboardState } from './hooks/useDashboardState';
 import { useHistory } from './hooks/useHistory';
 import { useCollectTrigger } from './hooks/useCollectTrigger';
 import { MonitorView } from './monitor/MonitorView';
+import { NetworkMapView } from './map/NetworkMapView';
 import { ChatPanel } from './tshoot/ChatPanel';
 import { CommandLog } from './tshoot/CommandLog';
 import { useTshootChat } from './tshoot/useTshootChat';
 import { relTime, today } from './lib/format';
 import './tshoot/tshoot.css';
 
-/** monitor = dashboard; tshoot = console + chat on desktop, chat on mobile; console = mobile console pane */
-type Tab = 'monitor' | 'tshoot' | 'console';
+/** monitor = dashboard; map = network map; tshoot = console + chat on desktop, chat on mobile; console = mobile console pane */
+type Tab = 'monitor' | 'map' | 'tshoot' | 'console';
 
 function readHash(): Tab {
   const h = window.location.hash;
-  return h === '#/tshoot' ? 'tshoot' : h === '#/console' ? 'console' : 'monitor';
+  return h === '#/tshoot' ? 'tshoot' : h === '#/console' ? 'console' : h === '#/map' ? 'map' : 'monitor';
 }
 
 function useHashTab(): [Tab, (t: Tab) => void] {
@@ -75,7 +76,7 @@ export default function App() {
 
   function ask(question: string) {
     chat.send(question);
-    if (window.matchMedia('(min-width: 1280px)').matches) setAsideOpen(true);
+    if (tab !== 'map' && window.matchMedia('(min-width: 1280px)').matches) setAsideOpen(true);
     else setTab('tshoot');
     setFocusKey((k) => k + 1);
     setToast('Sent to Tshoot');
@@ -98,7 +99,9 @@ export default function App() {
       ? 'flex w-full lg:w-[min(560px,44vw)] lg:border-l lg:border-white/[0.06]'
       : tab === 'console'
         ? 'hidden lg:flex lg:w-[min(560px,44vw)] lg:border-l lg:border-white/[0.06]'
-        : asideOpen
+        : tab === 'map'
+          ? 'hidden'
+          : asideOpen
           ? 'hidden xl:flex xl:w-[400px] 2xl:w-[440px] xl:border-l xl:border-white/[0.06]'
           : 'hidden';
 
@@ -130,10 +133,11 @@ export default function App() {
             {(
               [
                 { id: 'monitor', label: 'Monitor', icon: LayoutDashboard },
+                { id: 'map', label: 'Map', icon: MapIcon },
                 { id: 'tshoot', label: 'Tshoot', icon: Stethoscope },
               ] as const
             ).map(({ id, label, icon: Icon }) => {
-              const active = id === 'monitor' ? tab === 'monitor' : onTshoot;
+              const active = id === 'tshoot' ? onTshoot : tab === id;
               return (
                 <button
                   key={id}
@@ -181,6 +185,8 @@ export default function App() {
         >
           {onTshoot ? (
             <CommandLog commands={chat.commands} />
+          ) : tab === 'map' ? (
+            <NetworkMapView refreshKey={snap?.collected_at} onAsk={ask} />
           ) : (
             <MonitorView data={data} history={history} error={error} collecting={collecting} onCollect={runCheck} onAsk={ask} />
           )}
@@ -195,10 +201,11 @@ export default function App() {
 
       {/* mobile tab bar (coach style) */}
       <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-white/[0.06] bg-ink-900/90 pb-[env(safe-area-inset-bottom)] backdrop-blur-xl lg:hidden">
-        <div className="grid h-16 grid-cols-3">
+        <div className="grid h-16 grid-cols-4">
           {(
             [
               { id: 'monitor', label: 'Monitor', icon: LayoutDashboard },
+              { id: 'map', label: 'Map', icon: MapIcon },
               { id: 'console', label: 'Console', icon: Terminal },
               { id: 'tshoot', label: 'Tshoot', icon: MessageSquare },
             ] as const

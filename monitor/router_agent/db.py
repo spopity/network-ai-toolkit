@@ -95,7 +95,7 @@ CREATE INDEX IF NOT EXISTS idx_traffic_usage_mac ON traffic_usage (mac, hour DES
 def _connect():
     return psycopg2.connect(
         host=os.environ["PGHOST"],
-        port=int(os.getenv("PGPORT", 5432)),
+        port=int(os.getenv("PGPORT", "5432")),
         dbname=os.environ["PGDATABASE"],
         user=os.environ["PGUSER"],
         password=os.environ["PGPASSWORD"],
@@ -107,9 +107,8 @@ def _connect():
 def _cursor():
     conn = _connect()
     try:
-        with conn:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                yield cur
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            yield cur
     finally:
         conn.close()
 
@@ -131,7 +130,10 @@ _CHECK_DROP_SECURITY_KEYS = ("syslog_tail", "syslog_summary", "security_log_tail
 
 def _slim(snap: dict) -> dict:
     sec = {k: v for k, v in snap.get("security", {}).items() if k not in _CHECK_DROP_SECURITY_KEYS}
-    return {**snap, "security": sec}
+    out = {**snap, "security": sec}
+    if isinstance(snap.get("lan"), dict):  # the DHCP/ARP host table is only for the live map
+        out["lan"] = {k: v for k, v in snap["lan"].items() if k != "hosts"}
+    return out
 
 
 def insert_snapshot(record: dict, kind: str = "daily"):
@@ -289,7 +291,7 @@ _DNS_DEVICE_FILTER = """
 """
 
 
-def get_dns_devices(hours: int = 24, network: str = None) -> list:
+def get_dns_devices(hours: int = 24, network: str | None = None) -> list:
     """Per-device totals over the window, busiest first."""
     ensure_schema()
     with _cursor() as cur:
@@ -311,7 +313,7 @@ def get_dns_devices(hours: int = 24, network: str = None) -> list:
         return [_jsonable(dict(r)) for r in cur.fetchall()]
 
 
-def get_dns_lookups(hours: int = 24, device: str = None, domain: str = None, network: str = None,
+def get_dns_lookups(hours: int = 24, device: str | None = None, domain: str | None = None, network: str | None = None,
                     blocked_only: bool = False, new_only: bool = False, limit: int = 200) -> list:
     """(device, domain) pairs over the window. `device` matches key, name (substring), IP or MAC;
     `domain` is a substring. new_only = the device's first lookup of that domain fell in the window
@@ -367,7 +369,7 @@ _TRAFFIC_DEVICE = """
 """
 
 
-def get_traffic_devices(hours: int = 24, network: str = None) -> list:
+def get_traffic_devices(hours: int = 24, network: str | None = None) -> list:
     """Per-device download/upload over the window, busiest first, with each device's top apps.
     Name/network/IP are the device's most recent ones."""
     ensure_schema()
@@ -390,7 +392,7 @@ def get_traffic_devices(hours: int = 24, network: str = None) -> list:
         return [_jsonable(dict(r)) for r in cur.fetchall()]
 
 
-def get_traffic_apps(hours: int = 24, device: str = None, network: str = None, limit: int = 50) -> list:
+def get_traffic_apps(hours: int = 24, device: str | None = None, network: str | None = None, limit: int = 50) -> list:
     """Per-app download/upload over the window, for one device (MAC, IP or name substring),
     one network, or everything."""
     ensure_schema()
@@ -406,7 +408,7 @@ def get_traffic_apps(hours: int = 24, device: str = None, network: str = None, l
         return [_jsonable(dict(r)) for r in cur.fetchall()]
 
 
-def get_traffic_series(hours: int = 24, device: str = None, network: str = None) -> list:
+def get_traffic_series(hours: int = 24, device: str | None = None, network: str | None = None) -> list:
     """Hourly download/upload (one device, one network, or everything); empty hours are 0."""
     ensure_schema()
     with _cursor() as cur:

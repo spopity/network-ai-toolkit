@@ -1,19 +1,26 @@
 import json
 import re
 from collections import Counter
-from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from datetime import UTC, datetime
 
 from .collector import (
-    CONNMON_CMD, CUSTOM_CLIENTLIST_CMD, FIREWALL_DROPS_CMD, MERLIN_CHECK_CMD, MESH_CLIENTLIST_CMD, MESH_NODES_CMD,
-    NETWORKMAP_CMD, SKYNET_SETS_CMD, SPEEDTEST_CMD, SYSLOG_TAIL_CMD,
+    CONNMON_CMD,
+    CUSTOM_CLIENTLIST_CMD,
+    FIREWALL_DROPS_CMD,
+    MERLIN_CHECK_CMD,
+    MESH_CLIENTLIST_CMD,
+    MESH_NODES_CMD,
+    NETWORKMAP_CMD,
+    SKYNET_SETS_CMD,
+    SPEEDTEST_CMD,
+    SYSLOG_TAIL_CMD,
 )
 from .summarize import summarize_text
 
 RAW_SYSLOG_LINES = 200  # raw tail kept in the snapshot for humans (dashboard, Tshoot)
 
 
-def _out(results: List[Dict], cmd: str) -> str:
+def _out(results: list[dict], cmd: str) -> str:
     for r in results:
         if r["cmd"] == cmd:
             return r["out"].strip()
@@ -34,7 +41,7 @@ def _firmware_label(variant: str, firmver: str, buildno: str, extendno: str) -> 
     return f"{label}_{extendno}" if extendno else label
 
 
-def _temp_c(raw: str) -> Optional[float]:
+def _temp_c(raw: str) -> float | None:
     # thermal_zone reports millidegrees ("66956"); wl phy_tempsense reports "54 (0x36)"
     m = re.match(r"\s*(\d+)", raw)
     if not m:
@@ -43,7 +50,7 @@ def _temp_c(raw: str) -> Optional[float]:
     return round(v / 1000, 1) if v > 1000 else float(v)
 
 
-def _parse_system(results: List[Dict]) -> Dict:
+def _parse_system(results: list[dict]) -> dict:
     meminfo = _out(results, "cat /proc/meminfo")
     uptime_raw = _out(results, "cat /proc/uptime")
     loadavg = _out(results, "cat /proc/loadavg")
@@ -81,7 +88,7 @@ def _num(v: str):
         return None
 
 
-def _parse_connmon(raw: str) -> Optional[Dict]:
+def _parse_connmon(raw: str) -> dict | None:
     """connmon aggregates: line 1 = last 24h, line 2 = 7-day baseline."""
     lines = raw.splitlines()
     if not lines or not lines[0].strip():
@@ -101,7 +108,7 @@ def _parse_connmon(raw: str) -> Optional[Dict]:
     }
 
 
-def _parse_speedtest(raw: str) -> Optional[Dict]:
+def _parse_speedtest(raw: str) -> dict | None:
     """spdMerlin: line 1 = latest test, line 2 = 7-day count/avg/min."""
     lines = raw.splitlines()
     if not lines or not lines[0].strip():
@@ -109,7 +116,7 @@ def _parse_speedtest(raw: str) -> Optional[Dict]:
     ts, down, up, latency, jitter, server = (lines[0].split("|", 5) + [""] * 6)[:6]
     stats = (lines[1].split("|") if len(lines) > 1 else []) + [""] * 4
     return {
-        "last_at": datetime.fromtimestamp(int(ts), timezone.utc).isoformat(timespec="seconds") if ts.isdigit() else None,
+        "last_at": datetime.fromtimestamp(int(ts), UTC).isoformat(timespec="seconds") if ts.isdigit() else None,
         "download_mbps": _num(down),
         "upload_mbps": _num(up),
         "latency_ms": _num(latency),
@@ -122,7 +129,7 @@ def _parse_speedtest(raw: str) -> Optional[Dict]:
     }
 
 
-def _parse_wan(results: List[Dict]) -> Dict:
+def _parse_wan(results: list[dict]) -> dict:
     pppd_line = _out(results, "ps w | grep pppd | grep -v grep")
     return {
         "state": _out(results, "nvram get wan0_state_t"),
@@ -134,7 +141,7 @@ def _parse_wan(results: List[Dict]) -> Dict:
     }
 
 
-def _summarize_drops(raw: str, banned_raw: str = "", top: int = 8) -> Dict:
+def _summarize_drops(raw: str, banned_raw: str = "", top: int = 8) -> dict:
     """Aggregate firewall rows ("Mon DD HH:MM:SS|kind|src|dst|proto|dport") into counts.
 
     kind is "BLOCKED - INBOUND"/"BLOCKED - OUTBOUND"/... (Skynet) or "DROP" (router
@@ -169,7 +176,7 @@ def _summarize_drops(raw: str, banned_raw: str = "", top: int = 8) -> Dict:
     }
 
 
-def _parse_security(results: List[Dict]) -> Dict:
+def _parse_security(results: list[dict]) -> dict:
     syslog = _out(results, SYSLOG_TAIL_CMD)
     security_log = _out(results, "tail -n 200 /jffs/security_recored.log")
     aae_log = _out(results, "tail -n 100 /jffs/aae.log")
@@ -187,11 +194,11 @@ def _parse_security(results: List[Dict]) -> Dict:
     }
 
 
-def wifi_client_macs(wifi: Dict) -> List[str]:
+def wifi_client_macs(wifi: dict) -> list[str]:
     return wifi.get("clients_2g", []) + wifi.get("clients_5g", []) + wifi.get("clients_6g", [])
 
 
-def _parse_mesh_nodes(raw: str) -> List[Dict]:
+def _parse_mesh_nodes(raw: str) -> list[dict]:
     # "<TUF-AX6000>192.168.1.2>AA:BB:CC:00:00:02>0<RT-AX88U_Pro>192.168.1.1>AA:BB:CC:00:00:01>1..."
     nodes = []
     for entry in raw.split("<"):
@@ -201,7 +208,7 @@ def _parse_mesh_nodes(raw: str) -> List[Dict]:
     return sorted(nodes, key=lambda n: (not n["is_main"], n["model"]))
 
 
-def _band(key: str) -> Optional[str]:
+def _band(key: str) -> str | None:
     # clientlist.json band keys: "2G", "5G", "5G1", "6G", with "_N" suffixes for guest/SDN networks
     return {"2": "2g", "5": "5g", "6": "6g"}.get(key[:1]) if key != "wired_mac" else None
 
@@ -213,13 +220,13 @@ _NOT_A_VENDOR = re.compile(r"^(dhcpcd|android-dhcp|udhcp|MSFT \d)", re.IGNORECAS
 _CORP_SUFFIX = re.compile(r"[\s,.]+(co\.?,?\s*ltd|ltd|inc|incorporated|gmbh|llc|limited|corp(oration)?)\.?$", re.IGNORECASE)
 
 
-def _client_names(results: List[Dict]) -> Dict[str, Dict]:
+def _client_names(results: list[dict]) -> dict[str, dict]:
     """{MAC: {"name", "vendor"}} -- the router-UI name wins, then networkmap's learned name."""
     try:
         nmp = json.loads(_out(results, NETWORKMAP_CMD) or "{}")
     except ValueError:
         nmp = {}
-    names: Dict[str, Dict] = {}
+    names: dict[str, dict] = {}
     for mac, info in (nmp if isinstance(nmp, dict) else {}).items():
         if not isinstance(info, dict):
             continue
@@ -238,8 +245,8 @@ def _client_names(results: List[Dict]) -> Dict[str, Dict]:
     return names
 
 
-def _parse_wifi(results: List[Dict]) -> Dict:
-    def macs(band_out: str) -> List[str]:
+def _parse_wifi(results: list[dict]) -> dict:
+    def macs(band_out: str) -> list[str]:
         return [m.upper() for m in re.findall(r"(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}", band_out)]
 
     nodes = _parse_mesh_nodes(_out(results, MESH_NODES_CMD))
@@ -251,7 +258,7 @@ def _parse_wifi(results: List[Dict]) -> Dict:
 
     # every wireless client on every mesh node; a client roaming mid-refresh can be
     # listed under two nodes -- keep the stronger signal
-    clients: Dict[str, Dict] = {}
+    clients: dict[str, dict] = {}
     for node_mac, bands in (mesh if isinstance(mesh, dict) else {}).items():
         for key, entries in (bands or {}).items():
             band = _band(key)
@@ -289,7 +296,7 @@ def _parse_wifi(results: List[Dict]) -> Dict:
         n["clients_6g"] = sum(c["band"] == "6g" for c in mine)
         n["client_count"] = len(mine)
 
-    by_band = lambda b: [c["mac"] for c in client_list if c["band"] == b]  # noqa: E731
+    by_band = lambda b: [c["mac"] for c in client_list if c["band"] == b]
     return {
         "ssid_2g": _out(results, "nvram get wl0_ssid"),
         "ssid_5g": _out(results, "nvram get wl1_ssid"),
@@ -302,11 +309,11 @@ def _parse_wifi(results: List[Dict]) -> Dict:
     }
 
 
-def build_snapshot(router_name: str, host: str, grouped_results: Dict[str, List[Dict]]) -> Dict:
+def build_snapshot(router_name: str, host: str, grouped_results: dict[str, list[dict]]) -> dict:
     return {
         "router": router_name,
         "host": host,
-        "collected_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "collected_at": datetime.now(UTC).isoformat(timespec="seconds"),
         "system": _parse_system(grouped_results.get("system", [])),
         "wan": _parse_wan(grouped_results.get("wan", [])),
         "security": _parse_security(grouped_results.get("security", [])),

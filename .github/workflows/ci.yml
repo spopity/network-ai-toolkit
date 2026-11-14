@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Monitor Python (ruff + pytest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: monitor
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            monitor/requirements.txt
+            monitor/requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - name: Lint
+        run: ruff check --output-format=github .
+      - name: Tests
+        # no router, AdGuardHome or Postgres here: the suite fakes all of them
+        run: pytest
+
+  frontend:
+    name: Monitor frontend (oxlint + tsc + vite build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: monitor/dashboard/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: monitor/dashboard/frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build

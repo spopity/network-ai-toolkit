@@ -17,9 +17,8 @@ tx = upload (device -> internet), rx = download.
 """
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Dict, List, Optional
 
 from .dnslog import DEFAULT_NETWORKS, Namer
 
@@ -59,18 +58,18 @@ def parse(out: str):
 
 def bucket(ts: int) -> datetime:
     """A write covers the ~hour before it; file it under the hour its midpoint falls in."""
-    return datetime.fromtimestamp(ts - 1800, timezone.utc).replace(minute=0, second=0, microsecond=0)
+    return datetime.fromtimestamp(ts - 1800, UTC).replace(minute=0, second=0, microsecond=0)
 
 
-def aggregate(rows, namer: Namer, hidden_apps=()) -> List[Dict]:
+def aggregate(rows, namer: Namer, hidden_apps=()) -> list[dict]:
     hidden_apps = {a.lower() for a in hidden_apps}
     mac_ip = {}
     for ip, mac in namer.ip_mac.items():
         # prefer the IPv4 address a device holds on one of the known networks
         if mac not in mac_ip or (":" in mac_ip[mac] and ":" not in ip):
             mac_ip[mac] = ip
-    who: Dict[str, Dict] = {}
-    out: Dict[tuple, Dict] = {}
+    who: dict[str, dict] = {}
+    out: dict[tuple, dict] = {}
     for mac, app, cat, ts, tx, rx in rows:
         if not (tx or rx) or app.lower() in hidden_apps:
             continue
@@ -88,15 +87,15 @@ def aggregate(rows, namer: Namer, hidden_apps=()) -> List[Dict]:
         if r is None:
             r = out[k] = {"hour": hour, "mac": mac, "app": app, "category": cat, "tx": 0, "rx": 0,
                           "device": w["device"], "network": w["network"], "ip": w["ip"],
-                          "last_seen": datetime.fromtimestamp(ts, timezone.utc)}
+                          "last_seen": datetime.fromtimestamp(ts, UTC)}
         r["tx"] += tx
         r["rx"] += rx
-        r["last_seen"] = max(r["last_seen"], datetime.fromtimestamp(ts, timezone.utc))
+        r["last_seen"] = max(r["last_seen"], datetime.fromtimestamp(ts, UTC))
     return list(out.values())
 
 
-def summarize(rows: List[Dict], top: int = 5) -> Dict:
-    dev: Dict[str, Dict] = {}
+def summarize(rows: list[dict], top: int = 5) -> dict:
+    dev: dict[str, dict] = {}
     for r in rows:
         d = dev.setdefault(r["mac"], {"device": r["device"], "network": r["network"], "rx": 0, "tx": 0})
         d["rx"] += r["rx"]
@@ -111,7 +110,7 @@ def summarize(rows: List[Dict], top: int = 5) -> Dict:
 
 
 class TrafficLog:
-    def __init__(self, base: Path, cfg: Optional[Dict] = None):
+    def __init__(self, base: Path, cfg: dict | None = None):
         cfg = cfg or {}
         self.base = Path(base)
         self.cursor_path = self.base / ".traffic_cursor.json"
@@ -119,7 +118,7 @@ class TrafficLog:
         self.aliases = cfg.get("aliases")
         self.hide_apps = cfg.get("hide_apps") or ()
 
-    def collect(self, collector, snapshot: Dict, grouped: Dict[str, List[Dict]]) -> Optional[Dict]:
+    def collect(self, collector, snapshot: dict, grouped: dict[str, list[dict]]) -> dict | None:
         """Archive new Traffic Analyzer rows; return a small summary for the snapshot
         (or {"status": ...} when the router or Postgres is unavailable)."""
         from . import db
@@ -152,7 +151,7 @@ class TrafficLog:
         self.cursor_path.write_text(json.dumps({"ts": newest}))
         summary = summarize(agg)
         summary["new_rows"] = len(rows)
-        summary["through"] = datetime.fromtimestamp(newest, timezone.utc).isoformat(timespec="seconds")
+        summary["through"] = datetime.fromtimestamp(newest, UTC).isoformat(timespec="seconds")
         if more:
             summary["more_pending"] = True
         return summary

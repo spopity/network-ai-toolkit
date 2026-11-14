@@ -8,7 +8,6 @@ left the network still resolves.
 import json
 import re
 from pathlib import Path
-from typing import Dict, Optional
 
 _MAC = re.compile(r"\b(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\b")
 
@@ -17,7 +16,7 @@ def _norm(mac: str) -> str:
     return mac.upper().replace("-", ":")
 
 
-def label(info: Optional[Dict]) -> str:
+def label(info: dict | None) -> str:
     """Display name for a client entry ({"name", "vendor"}); never empty."""
     info = info or {}
     if info.get("name"):
@@ -27,14 +26,14 @@ def label(info: Optional[Dict]) -> str:
     return "unnamed device"
 
 
-def snapshot_names(snapshot: Optional[Dict]) -> Dict[str, str]:
+def snapshot_names(snapshot: dict | None) -> dict[str, str]:
     clients = ((snapshot or {}).get("wifi") or {}).get("clients") or []
     return {_norm(c["mac"]): label(c) for c in clients if c.get("mac")}
 
 
-def device_names(log_dir, snapshot: Optional[Dict] = None) -> Dict[str, str]:
+def device_names(log_dir, snapshot: dict | None = None) -> dict[str, str]:
     """{MAC: label} from known_clients.json, overridden by the current snapshot."""
-    names: Dict[str, str] = {}
+    names: dict[str, str] = {}
     try:
         known = json.loads((Path(log_dir) / "known_clients.json").read_text())
     except (OSError, ValueError):
@@ -46,7 +45,7 @@ def device_names(log_dir, snapshot: Optional[Dict] = None) -> Dict[str, str]:
     return names
 
 
-def name_macs(text: str, names: Dict[str, str]) -> str:
+def name_macs(text: str, names: dict[str, str]) -> str:
     """Rewrite every MAC in `text` as "Name (MAC)" (or "(Name, MAC)" when the MAC
     is already parenthesized). MACs whose name already appears just before them
     are left alone, so the function is idempotent."""
@@ -66,7 +65,7 @@ def name_macs(text: str, names: Dict[str, str]) -> str:
     return _MAC.sub(repl, text)
 
 
-def name_analysis(analysis: Optional[Dict], names: Dict[str, str]) -> Optional[Dict]:
+def name_analysis(analysis: dict | None, names: dict[str, str]) -> dict | None:
     """Copy of an analysis record with every section's MACs named."""
     if not analysis or not analysis.get("sections"):
         return analysis

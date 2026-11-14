@@ -221,6 +221,17 @@ first run backfilled the router's whole history (13 days, 66k rows).
 
 Only internet traffic is measured, not traffic between devices at home.
 
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest            # offline: the router, AdGuardHome and Postgres are faked
+ruff check .
+```
+
+GitHub Actions (`.github/workflows/ci.yml` at the repo root) runs these plus the dashboard's
+`npm run lint` and `npm run build` on every push to `main`.
+
 ## Known follow-ups (intentionally not done automatically)
 
 - **Router reboot test**: the `/jffs/scripts/services-start` key-persistence fix hasn't been validated against an actual reboot yet — rebooting the router is disruptive and wasn't done without explicit go-ahead.

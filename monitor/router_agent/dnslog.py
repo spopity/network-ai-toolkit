@@ -18,14 +18,14 @@ import json
 import logging
 import re
 from collections import Counter
-from datetime import datetime, timedelta, timezone
+from collections.abc import Iterable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
 
 import requests
 
-from .devices import device_names, label
 from .collector import ARP_CMD, LEASES_CMD
+from .devices import device_names, label
 from .snapshot import _client_names, _out
 
 logger = logging.getLogger(__name__)
@@ -51,7 +51,7 @@ def parse_ns(ts: str) -> int:
     return int(base.timestamp()) * 1_000_000_000 + int(frac)
 
 
-def _entry_key(e: Dict) -> str:
+def _entry_key(e: dict) -> str:
     q = e.get("question") or {}
     return f"{e.get('time')}|{e.get('client')}|{q.get('name')}|{q.get('type')}"
 
@@ -64,20 +64,20 @@ class AdGuardClient:
         self.auth = (username, password)
         self.timeout = timeout
 
-    def _get(self, path: str, **params) -> Dict:
+    def _get(self, path: str, **params) -> dict:
         r = requests.get(f"{self.url}/control/{path}", params=params, auth=self.auth, timeout=self.timeout)
         r.raise_for_status()
         return r.json()
 
-    def entries_since(self, cursor: Optional[Dict]) -> Tuple[List[Dict], Optional[Dict], bool]:
+    def entries_since(self, cursor: dict | None) -> tuple[list[dict], dict | None, bool]:
         """Query-log entries newer than `cursor`, oldest first, plus the next cursor and
         whether the page cap stopped the read early (older entries were skipped)."""
         if cursor:
             stop_ns, seen = cursor["ns"], set(cursor.get("keys", []))
         else:
-            stop_ns = int((datetime.now(timezone.utc) - timedelta(hours=FIRST_RUN_HOURS)).timestamp() * 1e9)
+            stop_ns = int((datetime.now(UTC) - timedelta(hours=FIRST_RUN_HOURS)).timestamp() * 1e9)
             seen = set()
-        out: List[Dict] = []
+        out: list[dict] = []
         older_than = None
         truncated = False
         for page_no in range(MAX_PAGES):
@@ -115,10 +115,10 @@ class AdGuardClient:
 
 # ------------------------------------------------------------------ client naming
 
-def ip_macs(grouped: Dict[str, List[Dict]]) -> Dict[str, str]:
+def ip_macs(grouped: dict[str, list[dict]]) -> dict[str, str]:
     """{IP: MAC} from DHCP leases (all three dnsmasq instances) and the ARP table."""
     wifi = grouped.get("wifi", [])
-    m: Dict[str, str] = {}
+    m: dict[str, str] = {}
     for line in _out(wifi, LEASES_CMD).splitlines():
         p = line.split()
         if len(p) >= 3 and ":" in p[1]:
@@ -130,7 +130,7 @@ def ip_macs(grouped: Dict[str, List[Dict]]) -> Dict[str, str]:
     return m
 
 
-def lease_names(grouped: Dict[str, List[Dict]]) -> Dict[str, str]:
+def lease_names(grouped: dict[str, list[dict]]) -> dict[str, str]:
     """{MAC: DHCP hostname} -- a last resort for devices networkmap never named."""
     names = {}
     for line in _out(grouped.get("wifi", []), LEASES_CMD).splitlines():
@@ -141,16 +141,15 @@ def lease_names(grouped: Dict[str, List[Dict]]) -> Dict[str, str]:
 
 
 class Namer:
-    def __init__(self, log_dir, snapshot: Dict, grouped: Dict[str, List[Dict]], networks: Dict[str, str],
-                 aliases: Optional[Dict[str, str]] = None):
+    def __init__(self, log_dir, snapshot: dict, grouped: dict[str, list[dict]], networks: dict[str, str],
+                 aliases: dict[str, str] | None = None):
         self.aliases = aliases or {}
         self.ip_mac = ip_macs(grouped)
         self.names = device_names(log_dir, snapshot)
         # wired devices aren't in the snapshot's wifi clients; networkmap/custom names cover them
         for mac, info in _client_names(grouped.get("wifi", [])).items():
-            if mac not in self.names or self.names[mac].startswith("unnamed"):
-                if info.get("name") or info.get("vendor"):
-                    self.names[mac] = label(info)
+            if (mac not in self.names or self.names[mac].startswith("unnamed")) and (info.get("name") or info.get("vendor")):
+                self.names[mac] = label(info)
         for mac, host in lease_names(grouped).items():
             if mac not in self.names or self.names[mac].startswith("unnamed"):
                 self.names[mac] = host
@@ -161,7 +160,7 @@ class Namer:
             return "Router"
         return next((n for prefix, n in self.networks.items() if ip.startswith(prefix)), "Other")
 
-    def __call__(self, ip: str, agh_name: str = "") -> Dict:
+    def __call__(self, ip: str, agh_name: str = "") -> dict:
         if ip in ROUTER_IPS:
             return {"key": "router", "mac": None, "device": "Router (itself)", "network": "Router"}
         mac = self.ip_mac.get(ip)
@@ -175,11 +174,11 @@ class Namer:
 
 # ------------------------------------------------------------------ aggregation
 
-def _blocked(e: Dict) -> bool:
+def _blocked(e: dict) -> bool:
     return str(e.get("reason", "")).startswith("Filtered")
 
 
-def _rule(e: Dict) -> Optional[str]:
+def _rule(e: dict) -> str | None:
     rules = e.get("rules") or []
     return (rules[0].get("text") or None) if rules and isinstance(rules[0], dict) else None
 
@@ -189,11 +188,11 @@ def is_hidden(domain: str, hidden: Iterable[str]) -> bool:
     return any(domain == h or domain.endswith("." + h) for h in hidden)
 
 
-def aggregate(entries: Iterable[Dict], namer: Namer, hidden: Iterable[str] = ()) -> List[Dict]:
+def aggregate(entries: Iterable[dict], namer: Namer, hidden: Iterable[str] = ()) -> list[dict]:
     """(hour, device, domain, blocked) rows with counts. Domains in `hidden` (and their
     subdomains) are dropped before anything is archived."""
     hidden = [h.lower().strip(".") for h in hidden]
-    rows: Dict[Tuple, Dict] = {}
+    rows: dict[tuple, dict] = {}
     for e in entries:
         q = e.get("question") or {}
         domain = (q.get("name") or "").rstrip(".").lower()
@@ -201,7 +200,7 @@ def aggregate(entries: Iterable[Dict], namer: Namer, hidden: Iterable[str] = ())
             continue
         ip = e.get("client") or ""
         who = namer(ip, ((e.get("client_info") or {}).get("name") or "").strip())
-        t = datetime.fromtimestamp(e["_ns"] / 1e9, timezone.utc)
+        t = datetime.fromtimestamp(e["_ns"] / 1e9, UTC)
         hour = t.replace(minute=0, second=0, microsecond=0)
         blocked = _blocked(e)
         k = (hour, who["key"], domain, blocked)
@@ -216,9 +215,9 @@ def aggregate(entries: Iterable[Dict], namer: Namer, hidden: Iterable[str] = ())
     return list(rows.values())
 
 
-def summarize(rows: List[Dict], new_domains: List[Dict], top: int = 8) -> Dict:
+def summarize(rows: list[dict], new_domains: list[dict], top: int = 8) -> dict:
     """Small per-check summary that goes into the snapshot and the daily rollup."""
-    by_net: Dict[str, Dict[str, int]] = {}
+    by_net: dict[str, dict[str, int]] = {}
     blocked_domains: Counter = Counter()
     blocked_devices: Counter = Counter()
     for r in rows:
@@ -241,13 +240,13 @@ def summarize(rows: List[Dict], new_domains: List[Dict], top: int = 8) -> Dict:
 # ------------------------------------------------------------------ entry point
 
 class DnsLog:
-    def __init__(self, base: Path, cfg: Dict):
+    def __init__(self, base: Path, cfg: dict):
         self.cursor_path = Path(base) / ".dns_cursor.json"
         self.base = Path(base)
         self.cfg = cfg
         self.networks = cfg.get("networks") or DEFAULT_NETWORKS
 
-    def _client(self) -> Optional[AdGuardClient]:
+    def _client(self) -> AdGuardClient | None:
         user, pw = self.cfg.get("username"), self.cfg.get("password")
         cred = self.cfg.get("credentials_file")
         if cred and not pw:
@@ -261,10 +260,12 @@ class DnsLog:
             return None
         return AdGuardClient(self.cfg["url"], user, pw)
 
-    def collect(self, snapshot: Dict, grouped: Dict[str, List[Dict]]) -> Optional[Dict]:
+    def collect(self, snapshot: dict, grouped: dict[str, list[dict]]) -> dict | None:
         """Pull new log entries, archive them, return the snapshot's `dns` summary
         (or a {"status": ...} dict when AdGuardHome or Postgres is unavailable)."""
-        from . import db  # Postgres is optional for the rest of network-ai; import lazily
+        from . import (
+            db,  # Postgres is optional for the rest of network-ai; import lazily
+        )
 
         client = self._client()
         if client is None:

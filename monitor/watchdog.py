@@ -5,7 +5,7 @@ import os
 import socket
 import time
 from collections import deque
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
@@ -13,8 +13,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from router_agent.collector import SSHCollector
 from router_agent import db
+from router_agent.collector import SSHCollector
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +22,7 @@ HISTORY_MAXLEN = 1440  # 30s interval * 1440 = 12h of sparkline history
 
 
 def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def is_up(targets, port, timeout=5) -> bool:
@@ -132,8 +132,8 @@ def main():
         write_status(status_path, {
             "up": currently_up,
             "checked_at": ts,
-            "down_since": datetime.fromtimestamp(first_failure_at, tz=timezone.utc).isoformat(timespec="seconds") if first_failure_at else None,
-            "last_restart_at": datetime.fromtimestamp(last_restart_at, tz=timezone.utc).isoformat(timespec="seconds") if last_restart_at else None,
+            "down_since": datetime.fromtimestamp(first_failure_at, tz=UTC).isoformat(timespec="seconds") if first_failure_at else None,
+            "last_restart_at": datetime.fromtimestamp(last_restart_at, tz=UTC).isoformat(timespec="seconds") if last_restart_at else None,
         }, history)
 
         if args.max_iterations and iterations >= args.max_iterations:
