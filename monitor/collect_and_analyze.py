@@ -7,9 +7,11 @@
 """
 import argparse
 import fcntl
+import json
 import os
 import socket
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import yaml
@@ -17,20 +19,21 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from router_agent import notify
+from router_agent import anomaly, db, notify, selfcheck, upnp
 from router_agent.claude_client import ClaudeClient
-from router_agent.collector import SSHCollector
+from router_agent.collector import CONNMON_POINTS_CMD, SSHCollector
 from router_agent.devices import device_names
 from router_agent.dnshealth import DnsHealth
-from router_agent.dnslog import DnsLog
+from router_agent.dnslog import DEFAULT_NETWORKS, DnsLog, Namer
 from router_agent.events import read_router_events, watchdog_summary
 from router_agent.llm_client import GeminiClient, LLMRouter, OllamaClient
 from router_agent.netmap import lan_snapshot, parse_services
 from router_agent.rollup import Rollup
 from router_agent.rollup import render as render_rollup
-from router_agent.snapshot import build_snapshot
+from router_agent.snapshot import _out, build_snapshot, parse_connmon_points
 from router_agent.storage import SnapshotStore
 from router_agent.traffic import TrafficLog
+from router_agent.upnp import UPNP_CMD
 
 
 def local_ip_towards(host: str):
@@ -41,6 +44,21 @@ def local_ip_towards(host: str):
             return s.getsockname()[0]
     except OSError:
         return None
+
+
+def write_connmon_points(base: Path, collector) -> None:
+    """Copy connmon's last 7 days to logs/connmon.json for the dashboard chart (best-effort;
+    the dashboard itself never SSHes to the router)."""
+    try:
+        out = collector.run_command(CONNMON_POINTS_CMD, timeout=30)["out"]
+        tmp = base / "connmon.json.tmp"
+        tmp.write_text(json.dumps({"fetched_at": datetime.now(UTC).isoformat(timespec="seconds"),
+                                   "points": parse_connmon_points(out)}, separators=(",", ":")))
+        tmp.replace(base / "connmon.json")
+    except Exception as e:
+        print(f"connmon points unavailable: {e}", file=sys.stderr)
+    finally:
+        collector.close()
 
 
 def main():
@@ -110,6 +128,12 @@ def main():
         # network map: wired topology, DHCP/ARP hosts and the router's services (dashboard only, never sent to an LLM)
         snapshot["lan"] = lan_snapshot(grouped, snapshot)
         snapshot["services"] = parse_services(grouped)
+        # ports LAN devices opened to the internet via UPnP; a device doing it for the first time -> event + Telegram
+        adg = cfg.get("adguard") or {}
+        namer = Namer(store.base, snapshot, grouped, adg.get("networks") or DEFAULT_NETWORKS)
+        names = {**namer.names, **{namer.ip_mac[ip]: a for ip, a in (adg.get("aliases") or {}).items() if ip in namer.ip_mac}}
+        snapshot["upnp"] = upnp.check_and_record(store.base, _out(grouped.get("services", []), UPNP_CMD),
+                                                 namer.ip_mac, names)
         hidden = cfg.get("hidden") or {}  # never archived: DNS domains (+ subdomains), Traffic Analyzer apps
         if cfg.get("adguard"):
             # per-device DNS lookups from AdGuardHome (archived in Postgres; summary only here)
@@ -123,6 +147,10 @@ def main():
                     **(cfg["traffic_analyzer"] if isinstance(cfg["traffic_analyzer"], dict) else {}),
                     "hide_apps": hidden.get("apps")}
             snapshot["traffic"] = TrafficLog(store.base, tcfg).collect(collector, snapshot, grouped)
+        if cfg.get("adguard") or cfg.get("traffic_analyzer"):
+            # unusual appliance behaviour vs its own baseline (new sites, upload bursts) -> events + Telegram
+            snapshot["anomalies"] = anomaly.run(store.base, cfg)
+        write_connmon_points(store.base, collector)
         snapshot["wan"]["watchdog_24h"] = watchdog_summary(store.base, since_hours=24)
         snapshot["wan"]["router_events_24h"] = [
             {k: e.get(k) for k in ("ts", "event", "state", "ip")}
@@ -154,6 +182,14 @@ def main():
             print(f"[{name}] wrote {path} (check, no LLM)")
         store.prune()
 
+    if args.mode == "daily":
+        # Postgres retention: 5-minute snapshots, DNS lookups and traffic older than N days
+        deleted = db.prune_old(cfg.get("db_retention_days", 90))
+        if deleted is not None:
+            print(f"postgres retention ({cfg.get('db_retention_days', 90)} days): deleted {deleted}")
+
+    # the watchdog runs the other self-checks; this run watches the watchdog in turn
+    selfcheck.run(cfg, store.base, only=("watchdog",))
     if notifier:
         notifier.flush()  # anything queued while Telegram was unreachable
     sys.exit(exit_code)

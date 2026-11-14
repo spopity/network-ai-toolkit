@@ -19,7 +19,7 @@ limits:
 monitor:
   latest_json: /opt/network-ai/logs/latest.json
   watchdog_status_json: /opt/network-ai/logs/watchdog_status.json
-  api_url: http://127.0.0.1:8080   # network-ai dashboard API (DNS lookup archive)
+  api_url: http://127.0.0.1:8080   # network-ai dashboard API: use its LAN listener (dashboard.host), not 127.0.0.1, when it runs behind tailscale serve
 
 audit:
   postgres: true   # also archive to table tshoot_audit (PG* vars in .env); JSONL is always written

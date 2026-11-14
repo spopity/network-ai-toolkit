@@ -10,6 +10,8 @@ ExecStart=/opt/network-ai/.venv/bin/python3 /opt/network-ai/watchdog.py --config
 Restart=always
 RestartSec=10
 User=root
+# logs/ is group netai (setgid) so the unprivileged dashboard can read and append; keep new files group-writable
+UMask=0007
 
 [Install]
 WantedBy=multi-user.target

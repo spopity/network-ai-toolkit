@@ -8,3 +8,5 @@ Type=oneshot
 WorkingDirectory=/opt/network-ai
 ExecStart=/opt/network-ai/.venv/bin/python3 /opt/network-ai/collect_and_analyze.py --config /opt/network-ai/config.yml --mode daily
 User=root
+# logs/ is group netai (setgid) so the unprivileged dashboard can read and append; keep new files group-writable
+UMask=0007

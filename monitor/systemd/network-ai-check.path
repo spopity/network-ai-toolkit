@@ -1,0 +1,10 @@
+[Unit]
+Description=Network AI - run a check when the dashboard asks ("Check now")
+
+[Path]
+# the unprivileged dashboard writes this file; the check itself runs as root
+PathChanged=/opt/network-ai/logs/.collect-request
+Unit=network-ai-check.service
+
+[Install]
+WantedBy=multi-user.target

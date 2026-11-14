@@ -1,4 +1,5 @@
-# network-ai dashboard (:8080) - reachable only via Tailscale, localhost (tshoot) and the router (wan-event hook)
+# network-ai dashboard (:8080, bound to the LAN address) - reachable only from localhost (Tshoot) and the
+# router (wan-event hook); the tailnet comes in through tailscale serve on a Unix socket instead
 table inet dashboard
 delete table inet dashboard
 table inet dashboard {

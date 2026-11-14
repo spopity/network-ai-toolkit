@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 
 TA_DB = "/jffs/.sys/TrafficAnalyzer/TrafficAnalyzer.db"
 SETTLE_SECONDS = 30
+GAP_SECONDS = 2 * 3600      # writes are hourly; a longer silence means the router stopped writing
+GAP_FILE = ".traffic_gap.json"
 MAX_ROWS = 200_000  # first run reads the router's whole history (~66k rows for 13 days)
 
 
@@ -148,6 +150,13 @@ class TrafficLog:
             logger.warning("Postgres traffic archive failed; will retry these rows next check: %s", e)
             return {"status": "archive_unavailable", "error": str(e)[:200]}
         newest = max(r[3] for r in rows)
+        first = min(r[3] for r in rows)
+        if after and first - after > GAP_SECONDS:
+            # the router wrote nothing for a while (e.g. its hour_monitor daemon was down): the
+            # first write after that holds the bytes of the whole gap, filed under one hour --
+            # remember it so per-hour baselines (anomaly.py) don't read it as a burst
+            (self.base / GAP_FILE).write_text(json.dumps({"from": after, "to": first}))
+            logger.warning("Traffic Analyzer gap of %.1f h before %s", (first - after) / 3600, first)
         self.cursor_path.write_text(json.dumps({"ts": newest}))
         summary = summarize(agg)
         summary["new_rows"] = len(rows)

@@ -85,6 +85,16 @@ def test_collect_advances_cursor_to_newest_row(tmp_path, monkeypatch):
     assert json.loads((tmp_path / ".traffic_cursor.json").read_text()) == {"ts": TS + 9}
 
 
+def test_collect_records_a_gap_in_router_writes(tmp_path, monkeypatch):
+    monkeypatch.setattr(db, "insert_traffic_rows", lambda rows: None)
+    (tmp_path / ".traffic_cursor.json").write_text(json.dumps({"ts": TS - 19 * 3600}))
+    TrafficLog(tmp_path).collect(FakeCollector(_out((MAC, "A", "x", TS, 1, 1))), {}, {})
+    assert json.loads((tmp_path / ".traffic_gap.json").read_text()) == {"from": TS - 19 * 3600, "to": TS}
+    (tmp_path / ".traffic_gap.json").unlink()
+    TrafficLog(tmp_path).collect(FakeCollector(_out((MAC, "A", "x", TS + 3600, 1, 1))), {}, {})
+    assert not (tmp_path / ".traffic_gap.json").exists()  # normal hourly write: no gap
+
+
 def test_collect_leaves_a_possibly_split_write_for_next_time(tmp_path, monkeypatch):
     monkeypatch.setattr(traffic, "MAX_ROWS", 2)
     monkeypatch.setattr(db, "insert_traffic_rows", lambda rows: None)

@@ -177,6 +177,52 @@ def insert_snapshot(record: dict, kind: str = "daily"):
         logger.warning("Postgres insert_snapshot failed (continuing without it): %s", e)
 
 
+# Retention (prune_old, run by the daily job): time-series tables that grow with every
+# check, as (table, time column, extra condition). Everything else is kept: daily
+# snapshots (the LLM analyses, ~15 KB/day), watchdog_events (outage history), dns_devices
+# and dns_first_seen (the "new domain" detection needs every domain a device ever used),
+# and Tshoot's tshoot_audit.
+RETENTION_TABLES = (
+    ("snapshots", "collected_at", "kind = 'check'"),
+    ("dns_lookups", "hour", None),
+    ("traffic_usage", "hour", None),
+)
+MIN_RETENTION_DAYS = 7  # a typo like `db_retention_days: 1` must not wipe the archive
+
+
+def prune_old(days: int | None = 90) -> dict | None:
+    """Delete RETENTION_TABLES rows older than `days`. -> {table: rows deleted}, {} when
+    retention is off (days 0/None), None when refused or Postgres failed. Best-effort:
+    never raises (the daily run must not fail on it); one transaction, so a failure
+    deletes nothing."""
+    if not days:
+        return {}
+    if int(days) < MIN_RETENTION_DAYS:
+        logger.warning("db_retention_days=%s is below %s, not pruning", days, MIN_RETENTION_DAYS)
+        return None
+    try:
+        ensure_schema()
+        deleted = {}
+        with _cursor() as cur:
+            for table, column, extra in RETENTION_TABLES:
+                cur.execute(
+                    f"DELETE FROM {table} WHERE {column} < now() - make_interval(days => %s)"
+                    + (f" AND {extra}" if extra else ""),
+                    (int(days),),
+                )
+                deleted[table] = cur.rowcount
+        return deleted
+    except Exception as e:
+        logger.warning("Postgres prune_old failed (nothing deleted): %s", e)
+        return None
+
+
+def ping() -> None:
+    """Raises when the archive is unreachable (used by selfcheck)."""
+    with _cursor() as cur:
+        cur.execute("SELECT 1")
+
+
 def insert_watchdog_event(event: dict):
     """Best-effort archive write. Never raises."""
     try:
@@ -421,3 +467,38 @@ def get_traffic_series(hours: int = 24, device: str | None = None, network: str 
             GROUP BY h.hour ORDER BY h.hour
             """, {"hours": hours, "device": device, "network": network})
         return [_jsonable(dict(r)) for r in cur.fetchall()]
+
+
+# ---- device behaviour baselines (router_agent/anomaly.py) ----
+
+def get_new_domains_since(since) -> tuple[list, dict]:
+    """First lookups (dns_first_seen) after `since`, with the device's watch start, plus
+    {device_key: [every domain the device looked up before `since`]} for those devices."""
+    ensure_schema()
+    with _cursor() as cur:
+        cur.execute("""
+            SELECT f.device_key, f.domain, f.first_seen, d.device, d.network, d.mac, d.first_seen AS watched_since
+            FROM dns_first_seen f JOIN dns_devices d USING (device_key)
+            WHERE f.first_seen > %s ORDER BY f.first_seen""", (since,))
+        recent = [dict(r) for r in cur.fetchall()]
+        keys = sorted({r["device_key"] for r in recent})
+        known: dict = {k: [] for k in keys}
+        if keys:
+            cur.execute("SELECT device_key, domain FROM dns_first_seen WHERE device_key = ANY(%s) AND first_seen <= %s",
+                        (keys, since))
+            for r in cur.fetchall():
+                known[r["device_key"]].append(r["domain"])
+    return recent, known
+
+
+def get_hourly_upload(days: int = 14) -> list:
+    """Upload bytes per device per hour over the last `days`: [{mac, device, network, hour, tx}]."""
+    ensure_schema()
+    with _cursor() as cur:
+        cur.execute("""
+            SELECT mac, hour, SUM(tx)::bigint AS tx,
+                   (ARRAY_AGG(device ORDER BY last_seen DESC))[1] AS device,
+                   (ARRAY_AGG(network ORDER BY last_seen DESC))[1] AS network
+            FROM traffic_usage WHERE hour > now() - make_interval(days => %s)
+            GROUP BY mac, hour ORDER BY mac, hour""", (int(days),))
+        return [dict(r) for r in cur.fetchall()]

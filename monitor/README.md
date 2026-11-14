@@ -17,7 +17,7 @@ connection after a sustained outage.
 - `router_agent/events.py` + `router/wan-event` — the router pushes its own WAN state changes: `router/wan-event` is installed on the router as the Merlin hook `/jffs/scripts/wan-event` and POSTs to the dashboard's `/api/router-event` (accepted only from the configured router IPs). Events land in `logs/router_events.log` and the Postgres `watchdog_events` table as `router_wan_<event>`, show up in the dashboard's events table, and the last 24h are fed to the LLM's system analysis.
 - `collect_and_analyze.py` — one-shot, two modes. `--mode check` (default; every 5 minutes via `network-ai-check.timer`, and the dashboard's "Check now" button): collect → summarize → track wifi clients → fold into the 24h rollup → store. **Never calls an LLM.** `--mode daily` (once a day via `network-ai-collect.timer`, 03:00 UTC — this machine's timezone is `Etc/UTC`; edit the timer's `OnCalendar=` if that's not your night): the same check, then the **only** LLM pass of the day, over the rollup, then a fresh rollup starts. Runs are serialized with `logs/.run.lock`; check records carry the last daily analysis forward in `latest.json`.
 - `router_agent/rollup.py` — day-long aggregation of the checks (`logs/rollup.json`). Each check keeps only the log lines newer than the previous check (timestamp cursor in `logs/.log_cursor.json`, so overlapping tails are never double-counted) and merges their syslog templates and firewall-drop counters, plus peaks/minimums (load, memory, temperatures, wifi clients, WAN-down checks, router reboots). The daily analysis renders it into the LLM's input (`day_summary` in the daily record).
-- Storage: daily records `logs/<router>-<ts>.json` (kept `retention_days`), checks gzipped in `logs/checks/` (kept `check_retention_hours`, ~9 KB each). Postgres gets every check too (`kind='check'`, raw log tails stripped); `/api/history` thins checks to ~hourly beyond 2 days. New wifi clients come from `logs/known_clients.json` (a client counts as new for 24 h after it first appears; devices unseen for `retention_days` are forgotten).
+- Storage: daily records `logs/<router>-<ts>.json` (kept `retention_days`), checks gzipped in `logs/checks/` (kept `check_retention_hours`, ~9 KB each). Postgres gets every check too (`kind='check'`, raw log tails stripped); `/api/history` thins checks to ~hourly beyond 2 days. **Postgres retention**: the daily run deletes 5-minute snapshots, `dns_lookups` and `traffic_usage` rows older than `db_retention_days` (default 90; 0 = keep forever; values under 7 are refused), via `db.prune_old()` / `RETENTION_TABLES`. Kept forever: daily analyses, `watchdog_events`, `dns_devices`/`dns_first_seen` (the "new domain" detection needs every domain a device ever used) and Tshoot's `tshoot_audit`. A plain `DELETE`, not a TimescaleDB policy, so it works on any Postgres; steady state is roughly 500 MB. New wifi clients come from `logs/known_clients.json` (a client counts as new for 24 h after it first appears; devices unseen for `retention_days` are forgotten).
 - `router_agent/notify.py` — Telegram push notifications (see "Telegram notifications").
 - `watchdog.py` — continuous connectivity monitor; restarts WAN (`service restart_wan_if <unit>`) after `down_threshold_seconds` of outage, with a cooldown between attempts. Supports `--dry-run` and `--max-iterations` for safe testing.
 - `dashboard/app.py` — Flask backend: serves the built React app as static files, `/api/state` (live), `/api/history` (Postgres-backed trends), `/api/collect-now` + `/api/collect-status` (on-demand trigger).
@@ -80,7 +80,8 @@ ssh admin@192.168.1.1 'cat > /jffs/scripts/wan-event && chmod 755 /jffs/scripts/
 `router_firmware_available` event (Events card) and pushes it to Telegram. Each version
 is reported once; if the dashboard was unreachable it retries on the next scheduled
 check. MerlinAU was deliberately not used: it has no notify-only mode and flashes on its
-own after its postponement period (max 199 days).
+own after its postponement period (max 199 days). (It used to email via amtm; replaced
+2026-11-14 by Telegram, so amtm email/SMTP is not needed.)
 
 ```bash
 ssh admin@192.168.1.1 'cat > /jffs/scripts/update-notification && chmod 755 /jffs/scripts/update-notification' < router/update-notification
@@ -119,7 +120,8 @@ lines from `services-start`, `nat-start` and both dnsmasq postconf scripts.
 ```bash
 .venv/bin/python3 collect_and_analyze.py --config config.yml   # one collection+analysis cycle
 .venv/bin/python3 watchdog.py --config config.yml              # connectivity watchdog (foreground)
-.venv/bin/python3 dashboard/app.py                             # dashboard on :8080
+.venv/bin/python3 dashboard/app.py                             # dashboard (waitress; listeners from dashboard: in config.yml)
+.venv/bin/python3 dashboard/app.py --dev                       # Flask development server instead
 ```
 
 Frontend development (hot reload, proxies `/api` to Flask on :8080):
@@ -128,6 +130,83 @@ Frontend development (hot reload, proxies `/api` to Flask on :8080):
 cd dashboard/frontend
 npm run dev
 ```
+
+### Dashboard access (Tailscale only) and who may approve Tshoot changes
+
+The dashboard runs as the unprivileged user `netai` under waitress
+(`systemd/network-ai-dashboard.service`, sandboxed: read-only system, writes only
+`logs/`, no capabilities). It has two listeners (`dashboard/serve.py`):
+
+| Listener | Used by | Identity |
+|---|---|---|
+| `dashboard.unix_socket` (`/run/network-ai/dashboard.sock`) | `tailscale serve`: https://<host>.<tailnet>.ts.net and http://<host>.<tailnet>.ts.net:8080 | trusted: serve adds `Tailscale-User-Login` + `X-Forwarded-For` and strips forged copies |
+| `dashboard.host:port` = `192.168.1.10:8080` (LAN address only) | the router's `wan-event` / `update-notification` hooks, Tshoot's API calls | none: can never approve |
+
+Never bind it to `0.0.0.0` or `127.0.0.1`: Tailscale runs in userspace mode here, so
+every `127.0.0.1` port is reachable from the tailnet and would bypass the identity check.
+
+**Approvals.** A Tshoot "Approve & run" is only forwarded when the request came through
+`tailscale serve` from a login in `dashboard.approvers.logins` **and** a device in
+`dashboard.approvers.devices` (looked up with `tailscale whois`; e.g. only your laptop and phone, so servers that
+run under the same account can't approve). Rejecting and chatting need no approver. The
+Tshoot card shows why when the current device can't approve; `/api/whoami` returns what
+the dashboard sees. Tshoot itself only answers requests carrying `TSHOOT_PROXY_KEY`
+(same value in both `.env` files), so its own `127.0.0.1:8090` is useless from the
+tailnet, and it records who decided each approval (`decision` rows in its audit log).
+
+**Without root.** "Check now" writes `logs/.collect-request`; `network-ai-check.path`
+starts the normal (root) check unit, and `/api/collect-status` reads that unit's state.
+The connection-quality chart reads `logs/connmon.json`, which every check writes, so
+the dashboard never SSHes to the router. `logs/` is group `netai` (setgid, the root
+units run with `UMask=0007`); `config.yml` is `0640 root:netai`; `.env` stays root-only
+and reaches the dashboard via `EnvironmentFile=`.
+
+Setup (once):
+
+```bash
+sudo useradd --system --no-create-home --shell /usr/sbin/nologin netai
+sudo chgrp -R netai logs && sudo chmod -R g+rwX,o-rwx logs && sudo find logs -type d -exec chmod g+s {} +
+sudo chgrp netai config.yml && sudo chmod 640 config.yml
+echo "TSHOOT_PROXY_KEY=$(openssl rand -hex 32)"   # add the same line to .env and /opt/tshoot/.env
+sudo cp systemd/network-ai-*.service systemd/network-ai-check.path /etc/systemd/system/ && sudo systemctl daemon-reload
+sudo systemctl enable --now network-ai-check.path && sudo systemctl restart network-ai-dashboard network-ai-watchdog tshoot
+sudo tailscale serve reset
+sudo tailscale serve --bg --https=443 unix:/run/network-ai/dashboard.sock
+sudo tailscale serve --bg --http=8080 unix:/run/network-ai/dashboard.sock
+```
+
+`nftables/dashboard.nft` additionally limits TCP 8080 to localhost and the router:
+
+```bash
+sudo mkdir -p /etc/nftables.d && sudo cp nftables/dashboard.nft /etc/nftables.d/
+grep -q nftables.d /etc/nftables.conf || echo 'include "/etc/nftables.d/*.nft"' | sudo tee -a /etc/nftables.conf
+sudo nft -f /etc/nftables.d/dashboard.nft      # undo: sudo nft delete table inet dashboard
+```
+
+### Deploying a change (`deploy.sh`)
+
+This host is production: code is edited in place in `/opt/network-ai`. After a change run
+
+```bash
+./deploy.sh              # verify, build, restart what's stale, health check
+./deploy.sh --dry-run    # only show what it would do
+./deploy.sh --fast       # skip pytest
+./deploy.sh --force      # restart the watchdog even while it tracks a WAN outage
+```
+
+It stops before restarting anything if py_compile or pytest fails (running services keep
+the old code; ruff only warns), runs `pip install` when `requirements.txt` changed and
+`npm ci`/`npm run build` when frontend sources are newer than `dist/`, then restarts
+`network-ai-dashboard` / `network-ai-watchdog` only if code, `config.yml` or `.env` is
+newer than the running process. The dashboard restart waits for `logs/.run.lock` (a
+"Check now" run would be killed with it); the watchdog is not restarted while it is
+tracking an outage. Then `/api/state` must answer 200. Failures are pushed to Telegram.
+Finally it lists what is never done automatically: changed `router/` scripts (reinstall
+on the router), `systemd/` units that differ from `/etc/systemd/system`, and a changed
+`config.example.yml` (new keys for `config.yml`). State: `logs/.deploy.json`.
+
+There is deliberately no CD from GitHub: development happens on this host, so CI
+(GitHub Actions) checks what was pushed and `deploy.sh` makes it live here.
 
 ### Installing as systemd services
 
@@ -182,6 +261,9 @@ reconfigure in the web UI and look values up with `gzip -dc $B/nvram.txt.gz | gr
 | `dns` | DNS health changes to unfiltered / down / ok again | `dnshealth.py` via `events.append_router_event` |
 | `new_device` | a wifi client seen for the first time (known_clients.json; devices forgotten after `retention_days` count as new again) | 5-minute check |
 | `firmware` | new Merlin release (`router/update-notification`) | `/api/router-event` |
+| `monitor` | network-ai itself is unhealthy, and again when fixed (see "Monitoring the monitor") | watchdog / 5-minute check |
+| `anomaly` | an appliance contacts many new sites in an hour or uploads far more than usual (see "Unusual device behaviour") | 5-minute check |
+| `upnp` | a device opens a port to the internet via UPnP **for the first time** (see "UPnP port mappings") | 5-minute check |
 | `daily` | opt-in (not sent unless listed): the daily LLM briefing's one-line overall summary (or that it failed) | `--mode daily` |
 
 WAN down is not pushed while it happens -- Telegram is unreachable then; the
@@ -201,6 +283,71 @@ Setup:
 4. `.venv/bin/python3 -m router_agent.notify --test` sends a test message.
 5. `sudo systemctl restart network-ai-watchdog.service network-ai-dashboard.service`
    (the 5-minute check picks the config up on its own).
+
+## Monitoring the monitor
+
+`router_agent/selfcheck.py` checks that network-ai itself is working. The watchdog runs it
+every 5 minutes; the 5-minute check watches the watchdog, so each guards the other.
+
+| Check | Problem when | Grace |
+|---|---|---|
+| checks | no successful 5-minute check for 20 min (timer stopped, router SSH failing, check crashing) | 10 min |
+| daily | no daily analysis for 26 h, or the last one failed (no LLM answered) | — |
+| backup | newest `/var/backups/router/<ts>` older than 26 h | — |
+| postgres | `SELECT 1` fails (only when `PGHOST` is set) | 15 min |
+| dashboard | `http://127.0.0.1:<port>/api/state` does not answer | 10 min |
+| disk | under 10 % free on the disk holding `logs/` | — |
+| watchdog | `logs/watchdog_status.json` older than 5 min (checked by the 5-minute check) | — |
+| traffic | no new Traffic Analyzer rows for 3 h (when `traffic_analyzer:` is on) | — |
+
+A problem that outlasts its grace records one `monitor_problem` event (Events card,
+Postgres, Telegram `monitor`); when it clears, one `monitor_ok`. Short blips inside
+the grace period stay silent. State: `logs/.selfcheck.json`. Thresholds: `monitor:` in
+`config.example.yml`.
+
+Nothing on this host can report the host itself being off (power, Proxmox, the LXC
+crashing). For that, set `monitor.heartbeat_url` to an external dead-man's switch,
+e.g. a free https://healthchecks.io check (period 5 min, grace 15 min, its own
+Telegram/email integration): the watchdog pings it every 5 minutes while the checks
+are fresh, and the service alerts when the pings stop. Not configured as of 2026-11-14.
+
+## Unusual device behaviour
+
+`router_agent/anomaly.py` compares every **appliance** (cameras, plugs, TVs, speakers,
+NAS, servers: anything `netmap.classify_type` doesn't call a phone, tablet or computer;
+the Guest network is skipped) with its own history in Postgres, every 5-minute check,
+without an LLM:
+
+| Kind | Alert when | Why this threshold (measured 2026-11-14) |
+|---|---|---|
+| `new_domains` | 4+ new **base** domains (`example.com`, subdomains don't count) within an hour | appliances never exceeded 2/h; phones and laptops reach 30-50/h, hence skipped |
+| `upload` | an hour with 100 MB+ uploaded **and** 10x the device's usual peak (95th percentile of its hourly uploads, 14 days) | a Reolink clip burst (53 MB vs 0.4 MB usual) stays below the floor |
+
+A device is judged only after 72 h of baseline. Each (kind, device) alerts at most once
+a day as an `anomaly` event (Events card, Postgres, Telegram `anomaly`); the first run
+records what is going on silently. Thresholds and `ignore_devices` (names or MACs that
+may do this): `anomaly:` in `config.example.yml`. State: `logs/.anomaly_state.json`.
+The baseline needs the DNS archive (AdGuardHome) and/or the Traffic Analyzer archive.
+
+## UPnP port mappings (internet exposure)
+
+Every 5-minute check reads the router's miniupnpd leases (`/tmp/upnp.leases`, plus
+`nvram get upnp_enable`) into `snapshot.upnp`: every port a LAN device opened to the
+internet via UPnP / NAT-PMP, named like the rest of the dashboard
+(`router_agent/upnp.py`). A mapping counts as **exposing** when it is TCP or permanent
+(lifetime 0), e.g. a NAS opening its login page; short-lived UDP mappings (Tailscale's
+2-hour NAT-PMP ones, consoles, VoIP) are listed but never alerted on.
+
+Alerts are per device and only once: `logs/.upnp_known.json` remembers every device
+that ever held an exposing mapping. A device not on that list opening one records an
+`upnp_new_device` event (Events card, Postgres) and a Telegram message (`upnp` in
+`notify.events`). A known device closing and re-opening its ports, or opening more,
+stays quiet. The first run records whatever was open as known, silently. To be alerted
+about a device again, delete its entry from `logs/.upnp_known.json`.
+
+Started 2026-11-14 with nothing exposed (the Synology's DSM "Router Configuration"
+mappings for 5000/5001/6690 had just been removed; QuickConnect now uses Synology's relay),
+so the Synology re-opening them would alert once.
 
 ## DNS lookups (AdGuardHome)
 
@@ -252,6 +399,28 @@ first run backfilled the router's whole history (13 days, 66k rows).
 
 Only internet traffic is measured, not traffic between devices at home.
 
+## Network map (Map tab)
+
+Every device on the network, in its room, linked to the mesh node it is connected to.
+Each 5-minute check also stores `snapshot.lan` (`router_agent/netmap.py`): which node each
+**wired** device sits behind (AiMesh's `/tmp/clientlist.json` lists per node every MAC on
+its ethernet ports, i.e. everything downstream, so the node with the smallest list holding a
+MAC is the one it is cabled to), the backhaul between nodes, and the DHCP/ARP host table;
+and `snapshot.services` (what runs on the router: Skynet, AdGuardHome, dnsmasq, NTP,
+WireGuard peers, AiProtection, QoS, connmon, spdMerlin, scribe, ...). Neither is sent to the LLM.
+
+- API: `/api/network-map` (built from `logs/latest.json` + `known_clients.json`, no SSH).
+- Rooms come from device names (`livingroom_Lamp` -> Living room); devices without one go
+  to Mobile / Server / Utility / Unassigned and are marked as guessed. Mesh nodes take the
+  room most of their devices are in. Override with `network_map.rooms` in `config.yml`
+  (by name, IP or MAC).
+- Device type and brand are guessed from name, DHCP hostname, vendor and MAC prefix;
+  logos come from `simple-icons` (Reolink, Tuya, Meross, Viessmann, Gardena, WiZ have none
+  and show only the type icon).
+- Links: Wi-Fi (band + signal), cable, VPN (WireGuard handshake < 3 min), "seen" (answers
+  ARP but on no node's list). Proxmox guests missing from the wired lists are drawn behind
+  the same node as the other guests ("inferred").
+
 ## Tests
 
 ```bash
@@ -260,7 +429,7 @@ pytest            # offline: the router, AdGuardHome and Postgres are faked
 ruff check .
 ```
 
-GitHub Actions (`.github/workflows/ci.yml` at the repo root) runs these plus the dashboard's
+GitHub Actions (`.github/workflows/ci.yml`) runs these plus the dashboard's
 `npm run lint` and `npm run build` on every push to `main`.
 
 ## Known follow-ups (intentionally not done automatically)

@@ -13,12 +13,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from router_agent import db, notify
+from router_agent import db, notify, selfcheck
 from router_agent.collector import SSHCollector
 
 logger = logging.getLogger(__name__)
 
 HISTORY_MAXLEN = 1440  # 30s interval * 1440 = 12h of sparkline history
+SELFCHECK_INTERVAL = 300  # monitor-the-monitor checks (router_agent/selfcheck.py)
 
 
 def now_iso() -> str:
@@ -90,6 +91,7 @@ def main():
     last_restart_at = None
     restarts_this_outage = 0
     currently_up = True
+    last_selfcheck = 0.0
 
     print(f"watchdog started: targets={targets} interval={check_interval}s "
           f"down_threshold={down_threshold}s cooldown={cooldown}s dry_run={args.dry_run}")
@@ -144,6 +146,11 @@ def main():
             "down_since": datetime.fromtimestamp(first_failure_at, tz=UTC).isoformat(timespec="seconds") if first_failure_at else None,
             "last_restart_at": datetime.fromtimestamp(last_restart_at, tz=UTC).isoformat(timespec="seconds") if last_restart_at else None,
         }, history)
+
+        if time.monotonic() - last_selfcheck >= SELFCHECK_INTERVAL:
+            # is network-ai itself healthy? (checks, daily run, backups, Postgres, dashboard, disk)
+            selfcheck.run(cfg, log_dir, skip=("watchdog",))  # never raises
+            last_selfcheck = time.monotonic()
 
         if args.max_iterations and iterations >= args.max_iterations:
             break

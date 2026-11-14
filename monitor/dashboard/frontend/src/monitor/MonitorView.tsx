@@ -800,6 +800,16 @@ function describe(e: Ev): { label: string; sub?: string; tone: Tone; icon: typeo
           icon: ShieldAlert,
         };
       }
+      if (e.event === 'anomaly')
+        return { label: `Unusual activity: ${String(d.device ?? d.mac)}`, sub: d.summary ? String(d.summary) : undefined, tone: 'caution', icon: ShieldAlert };
+      if (e.event === 'monitor_problem')
+        return { label: `Monitoring: ${String(d.title ?? d.check)} problem`, sub: d.problem ? String(d.problem) : undefined, tone: 'high', icon: ShieldAlert };
+      if (e.event === 'monitor_ok')
+        return { label: `Monitoring: ${String(d.title ?? d.check)} OK again`, tone: 'ok', icon: CheckCircle2 };
+      if (e.event === 'upnp_new_device') {
+        const ports = Array.isArray(d.ports) ? (d.ports as string[]) : [];
+        return { label: `${String(d.device ?? d.ip)} opened a port to the internet`, sub: ports.join(', ') || undefined, tone: 'caution', icon: ShieldAlert };
+      }
       if (e.event === 'router_firmware_available')
         return { label: `New firmware available: ${String(d.new)}`, sub: d.current ? `installed ${String(d.current)}` : undefined, tone: 'info', icon: RouterIcon };
       if (e.event.startsWith('router_wan_')) {

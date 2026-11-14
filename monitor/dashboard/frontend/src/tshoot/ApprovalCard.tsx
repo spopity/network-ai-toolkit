@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { AlertTriangle, Check, CheckCircle2, Clock, ShieldAlert, Undo2, X, XCircle } from 'lucide-react';
 import type { ApprovalStatus, ChatItem } from './types';
 
@@ -24,8 +24,34 @@ interface Props {
   onDecide: (id: string, decision: 'approve' | 'reject', note: string) => void;
 }
 
+interface WhoAmI {
+  can_approve: boolean;
+  reason: string | null;
+  login?: string | null;
+  device?: string | null;
+}
+
+/** Whether this browser (Tailscale login + device) may approve; the dashboard enforces it too. */
+function useWhoAmI(active: boolean) {
+  const [who, setWho] = useState<WhoAmI | null>(null);
+  useEffect(() => {
+    if (!active) return;
+    let cancelled = false;
+    fetch('/api/whoami')
+      .then((r) => r.json())
+      .then((j: WhoAmI) => !cancelled && setWho(j))
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [active]);
+  return who;
+}
+
 export function ApprovalCard({ approval: a, busy, onDecide }: Props) {
   const [note, setNote] = useState('');
+  const who = useWhoAmI(a.status === 'pending');
+  const blocked = who !== null && !who.can_approve;
   const pending = a.status === 'pending';
   const risk = RISK[a.risk] ?? RISK.medium;
   const done = a.status === 'pending' ? null : STATUS[a.status];
@@ -88,8 +114,15 @@ export function ApprovalCard({ approval: a, busy, onDecide }: Props) {
             >
               <X size={14} /> Reject
             </button>
+            {blocked && (
+              <p className="flex basis-full items-start gap-1.5 text-[12px] text-amber-200">
+                <ShieldAlert size={13} className="mt-0.5 shrink-0" />
+                {who?.reason ?? 'This device may not approve router changes.'}
+              </p>
+            )}
             <button
-              disabled={busy}
+              disabled={busy || blocked}
+              title={blocked ? (who?.reason ?? undefined) : undefined}
               onClick={() => onDecide(a.id, 'approve', note)}
               className="inline-flex items-center gap-1.5 rounded-lg bg-gradient-to-br from-emerald-500 to-teal-600 px-3 py-1.5 text-[12.5px] font-semibold text-white shadow-lg shadow-emerald-950/40 transition hover:brightness-110 disabled:opacity-40"
             >

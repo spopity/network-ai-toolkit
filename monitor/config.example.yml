@@ -10,6 +10,8 @@ routers:
 log_dir: logs
 retention_days: 14          # daily (LLM-analyzed) records
 check_retention_hours: 48   # 5-minute check records (gzipped, logs/checks/)
+db_retention_days: 90       # Postgres: 5-minute snapshots, DNS lookups, traffic (pruned by the daily run;
+                            # 0 = keep forever). Daily analyses, events and "first seen" data are kept.
 
 llm:
   # tried in this order; the first backend that answers every prompt writes the
@@ -38,8 +40,17 @@ watchdog:
   log_file: logs/watchdog.log
 
 dashboard:
-  host: 0.0.0.0
+  # TCP listener for the router's wan-event hook and Tshoot: bind the LAN address, not
+  # 0.0.0.0/127.0.0.1 if Tailscale runs in userspace mode (every 127.0.0.1 port is
+  # reachable from the tailnet there, bypassing the approval check below)
+  host: 192.168.1.10
   port: 8080
+  # Optional: listener for `tailscale serve` (trusted identity headers). Without it nobody
+  # can approve Tshoot changes from the dashboard.
+  # unix_socket: /run/network-ai/dashboard.sock
+  # approvers:
+  #   logins: [you@example.com]
+  #   devices: [laptop, phone]    # tailscale device names; empty = any device of those logins
 
 # Optional: AdGuardHome on the router. Per-device DNS lookups are pulled every
 # 5-minute check (router_agent/dnslog.py) and archived in Postgres.
@@ -70,7 +81,7 @@ dashboard:
 # notify:
 #   telegram:
 #     chat_id: "123456789"
-#   events: [wan, dns, new_device, firmware]   # the default; add `daily` for the LLM briefing summary
+#   events: [wan, dns, new_device, firmware, upnp, monitor, anomaly]   # the default; add `daily` for the LLM briefing summary
 #   wan_min_downtime_seconds: 60                        # shorter outages are not pushed
 #   timezone: Europe/Berlin                             # times in messages (default: host's)
 #   dashboard_url: http://my-host.tailnet.ts.net:8080   # optional link under each message
@@ -84,3 +95,24 @@ dashboard:
 #     RT-AX52: Shed
 #     "192.168.1.10": Server
 #     Samsung-Washer: Bathroom
+
+# Optional: monitor-the-monitor thresholds (router_agent/selfcheck.py; these are the defaults).
+# Problems are pushed as `monitor` notifications, once when they start and once when fixed.
+# monitor:
+#   check_max_age_minutes: 20      # no successful 5-minute check for this long
+#   daily_max_age_hours: 26        # no daily analysis (or the last one failed)
+#   backup_dir: /var/backups/router
+#   backup_max_age_hours: 26
+#   disk_min_free_pct: 10
+#   traffic_max_age_hours: 3     # Traffic Analyzer stopped writing
+#   heartbeat_url: https://hc-ping.com/<uuid>   # external dead-man's switch, pinged while checks are fresh
+
+# Optional: unusual appliance behaviour (router_agent/anomaly.py; these are the defaults).
+# Phones, tablets and computers and the Guest network are never checked.
+# anomaly:
+#   new_domains_per_hour: 4    # new base domains (example.com) within an hour
+#   upload_min_mb: 100         # an upload burst must be at least this big ...
+#   upload_factor: 10          # ... and this many times the device's usual hourly peak
+#   min_history_hours: 72      # baseline needed before a device is judged
+#   cooldown_hours: 24         # one alert per device and kind per day
+#   ignore_devices: []         # device names or MACs that may do this

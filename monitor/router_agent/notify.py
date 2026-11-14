@@ -9,6 +9,13 @@ What is sent (each can be switched off with `notify.events` in config.yml):
   new_device  a wifi client seen for the first time
   firmware    the router's scheduled firmware check found a new release
               (router/update-notification posts it to /api/router-event)
+  monitor     network-ai itself is unhealthy / healthy again: stale checks, failed daily
+              analysis, old backup, Postgres/dashboard down, low disk, watchdog dead
+              (router_agent/selfcheck.py)
+  anomaly     an appliance behaves unusually: many new sites in an hour or an upload far
+              above its own baseline (router_agent/anomaly.py; phones/computers skipped)
+  upnp        a device opened a port to the internet via UPnP for the first time
+              (router_agent/upnp.py; known devices re-opening ports stay quiet)
   daily       the daily LLM briefing's one-line overall summary (opt-in: not in the default list)
 
 Best-effort like the Postgres archive: sending never raises, so a Telegram outage
@@ -22,6 +29,7 @@ The bot token is a secret: TELEGRAM_BOT_TOKEN in .env. The chat id goes in confi
 
   python -m router_agent.notify --config config.yml --chat-id   # find your chat id
   python -m router_agent.notify --config config.yml --test      # send a test message
+  python -m router_agent.notify --config config.yml --send TEXT # send any text (deploy.sh)
 """
 import argparse
 import fcntl
@@ -41,8 +49,8 @@ LOCK_FILE = ".notify.lock"
 QUEUE_MAX = 50                       # oldest dropped beyond this
 QUEUE_MAX_AGE = timedelta(days=2)    # older undelivered messages are dropped, not sent
 TIMEOUT = 10
-ALL_EVENTS = ("wan", "dns", "new_device", "firmware", "daily")
-DEFAULT_EVENTS = ("wan", "dns", "new_device", "firmware")  # major events only
+ALL_EVENTS = ("wan", "dns", "new_device", "firmware", "upnp", "monitor", "anomaly", "daily")
+DEFAULT_EVENTS = ("wan", "dns", "new_device", "firmware", "upnp", "monitor", "anomaly")  # major events only
 
 _notifier = None  # set by configure(); every hook is a no-op without it
 
@@ -212,6 +220,31 @@ class Notifier:
                 "Nothing was downloaded or installed. "
                 '<a href="https://www.asuswrt-merlin.net/changelog">Changelog</a>'
             )
+        elif kind == "monitor_problem" and "monitor" in self.events:
+            self.send(f"⚠️ <b>network-ai: {html.escape(event.get('title') or event.get('check') or '?')} problem</b>\n"
+                      f"{html.escape(event.get('problem') or '')}\nSince {self.hhmm(event.get('since'))}." + self._footer())
+        elif kind == "monitor_ok" and "monitor" in self.events:
+            since = f" (failing since {self.hhmm(event['since'])})" if event.get("since") else ""
+            self.send(f"✅ <b>network-ai: {html.escape(event.get('title') or event.get('check') or '?')} OK again</b>{since}."
+                      + self._footer())
+        elif kind == "anomaly" and "anomaly" in self.events:
+            who = html.escape(event.get("device") or event.get("mac") or "?")
+            net = f" [{html.escape(event['network'])}]" if event.get("network") else ""
+            lines = [f"🕵️ <b>Unusual activity: {who}</b>{net}", html.escape(event.get("summary") or "")]
+            if event.get("domains"):
+                lines.append("New: " + ", ".join(html.escape(d) for d in event["domains"][:12])
+                             + (" …" if len(event["domains"]) > 12 else ""))
+            lines.append("Check it in the dashboard (DNS / Internet usage). Expected? Add the device to "
+                         "anomaly.ignore_devices.")
+            self.send("\n".join(lines) + self._footer())
+        elif kind == "upnp_new_device" and "upnp" in self.events:
+            who = html.escape(event.get("device") or event.get("ip") or "?")
+            where = ", ".join(html.escape(x) for x in (event.get("ip"), event.get("mac")) if x and x != event.get("device"))
+            lines = [f"🔓 <b>{who} opened a port to the internet</b>" + (f" ({where})" if where else "")]
+            lines += [f"• {html.escape(p)}" for p in (event.get("ports") or [])[:10]]
+            lines.append("First time for this device (via UPnP). If unexpected, turn it off in the "
+                         "device's settings or disable UPnP on the router.")
+            self.send("\n".join(lines) + self._footer())
 
     def new_devices(self, clients: list[dict]) -> None:
         if "new_device" not in self.events or not clients:
@@ -279,6 +312,7 @@ def main():
     g.add_argument("--chat-id", action="store_true", help="list chats that messaged the bot (send it /start first)")
     g.add_argument("--test", action="store_true", help="send a test message")
     g.add_argument("--flush", action="store_true", help="deliver queued messages now")
+    g.add_argument("--send", metavar="TEXT", help="send TEXT (HTML-escaped) right away, e.g. from deploy.sh")
     args = p.parse_args()
 
     cfg = yaml.safe_load(Path(args.config).read_text())
@@ -307,6 +341,8 @@ def main():
         n.flush()
         print("queue empty" if not (n.base / QUEUE_FILE).exists() else "some messages are still queued")
         return
+    if args.send:
+        raise SystemExit(0 if n.send(html.escape(args.send) + n._footer()) else "message not delivered")
     ok = n.send(f"✅ <b>network-ai test</b>\nTelegram notifications work. Sending: {', '.join(sorted(n.events))}."
                 + n._footer())
     raise SystemExit(0 if ok else "test message not delivered (see the error above)")

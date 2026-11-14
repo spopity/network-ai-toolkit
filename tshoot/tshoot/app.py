@@ -1,7 +1,12 @@
 """Tshoot HTTP API (Server-Sent Events, same wire format as the AI Coach chat).
 
 Listens on localhost only; the network-ai dashboard proxies /api/tshoot/* here.
+With Tailscale in userspace mode every 127.0.0.1 port is reachable from the tailnet, so
+when TSHOOT_PROXY_KEY is set (.env, same value as in network-ai's .env) only requests
+carrying it -- i.e. coming through the dashboard proxy, which also enforces who may
+approve changes -- are answered.
 """
+import hmac
 import json
 import logging
 import os
@@ -39,6 +44,15 @@ SESSIONS = SessionStore()
 
 app = Flask(__name__)
 _SID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+PROXY_KEY = os.getenv("TSHOOT_PROXY_KEY", "")
+
+
+@app.before_request
+def _require_proxy_key():
+    if PROXY_KEY and request.path != "/api/tshoot/health" and not hmac.compare_digest(
+            request.headers.get("X-Tshoot-Proxy-Key", ""), PROXY_KEY):
+        return jsonify({"error": "forbidden: use the network-ai dashboard"}), 403
+    return None
 
 
 def _sse(gen):
@@ -101,6 +115,9 @@ def approve():
     session, err = _session_from(body)
     if err:
         return err
+    # who decided, as identified by the dashboard (Tailscale login + device)
+    AUDIT.record("decision", session.id, decision=decision, approval_id=str(body.get("approval_id") or ""),
+                 user=request.headers.get("X-Tshoot-User") or "unknown")
     return _sse(_locked_turn(session, lambda: AGENT.resume(
         session, str(body.get("approval_id") or ""), decision == "approve", (body.get("note") or "")[:500])))
 

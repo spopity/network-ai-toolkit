@@ -4,7 +4,7 @@ Chat-driven troubleshooting for the ASUS RT-AX88U Pro (Asuswrt-Merlin). Tshoot
 is a function-calling agent that diagnoses and fixes issues over the router's
 SSH CLI. Claude answers by default and Gemini is selectable; both have the
 same access (see [Chat model](#chat-model)). You talk to it from the **Tshoot** tab of the network-ai
-dashboard (`http://<dashboard-host>:8080/#/tshoot`).
+dashboard (`http://<dashboard-host>:8080/#/tshoot`, Tailscale only).
 
 Tshoot is a separate project from the network-ai analyzer. It has its own venv,
 config, `.env` and service, and imports nothing from `/opt/network-ai`. Its
@@ -12,10 +12,16 @@ only links to network-ai are:
 - it **reads** the analyzer's `logs/latest.json` / `watchdog_status.json`
   (`get_monitor_snapshot` tool),
 - it **queries** the dashboard's read-only `/api/dns/devices` and `/api/dns/lookups`
-  (AdGuardHome lookups per device; `get_dns_lookups` tool, `monitor.api_url`) and
+  (AdGuardHome lookups per device; `get_dns_lookups` tool, `monitor.api_url` = the
+  dashboard's LAN listener, not 127.0.0.1) and
   `/api/traffic/devices` / `/api/traffic/detail` (internet usage per device and app from
   the router's Traffic Analyzer; `get_traffic_usage` tool),
-- the dashboard's Flask app proxies `/api/tshoot/*` → `127.0.0.1:8090`,
+- the dashboard proxies `/api/tshoot/*` → `127.0.0.1:8090`. It decides **who may approve**
+  a change (Tailscale login + device, `dashboard.approvers` in network-ai's config.yml) and
+  adds `X-Tshoot-Proxy-Key`; with `TSHOOT_PROXY_KEY` set in `.env` (same value as in
+  network-ai's `.env`) Tshoot refuses every request without it, because userspace
+  Tailscale makes `127.0.0.1:8090` reachable from the tailnet. Each decision is audited
+  with the approver (`decision` rows, `user` = login + device),
 - the chat UI lives in `network-ai/dashboard/frontend/src/tshoot/`.
 
 ## Safety model

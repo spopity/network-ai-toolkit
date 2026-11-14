@@ -88,6 +88,20 @@ def _num(v: str):
         return None
 
 
+def parse_connmon_points(raw: str) -> list[dict]:
+    """CONNMON_POINTS_CMD output -> [{"ts", "ping", "jitter", "quality"}, ...]."""
+    points = []
+    for line in (raw or "").splitlines():
+        parts = line.split("|")
+        if len(parts) == 4:
+            try:
+                points.append({"ts": int(float(parts[0])), "ping": float(parts[1]),
+                               "jitter": float(parts[2]), "quality": float(parts[3])})
+            except ValueError:
+                continue
+    return points
+
+
 def _parse_connmon(raw: str) -> dict | None:
     """connmon aggregates: line 1 = last 24h, line 2 = 7-day baseline."""
     lines = raw.splitlines()

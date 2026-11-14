@@ -1,16 +1,48 @@
 [Unit]
-Description=Network AI - router monitoring dashboard
-After=network-online.target
+Description=Network AI - router monitoring dashboard (unprivileged, behind tailscale serve)
+After=network-online.target tailscaled.service
 Wants=network-online.target
 
 [Service]
 Type=simple
+User=netai
+Group=netai
 WorkingDirectory=/opt/network-ai
+# .env stays root-only (0600); systemd reads it before dropping privileges
+EnvironmentFile=/opt/network-ai/.env
 Environment=NETWORK_AI_CONFIG=/opt/network-ai/config.yml
+Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStart=/opt/network-ai/.venv/bin/python3 /opt/network-ai/dashboard/app.py
 Restart=always
 RestartSec=10
-User=root
+# /run/network-ai/dashboard.sock: the listener tailscale serve proxies to (dashboard.unix_socket)
+RuntimeDirectory=network-ai
+RuntimeDirectoryMode=0750
+UMask=0007
+
+# sandbox: the dashboard only needs to read the project, write logs/ and talk to
+# Postgres, Tshoot, tailscaled (whois) and systemd (check status)
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/network-ai/logs
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
 
 [Install]
 WantedBy=multi-user.target

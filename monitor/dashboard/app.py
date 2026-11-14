@@ -20,15 +20,18 @@ from flask import (
     stream_with_context,
 )
 
-load_dotenv()
+try:
+    load_dotenv()
+except OSError:
+    pass  # under systemd .env stays root-only; the unit passes it via EnvironmentFile=
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
 from router_agent import db, notify
-from router_agent.collector import CONNMON_DB, SSHCollector
 from router_agent.devices import device_names, name_analysis
 from router_agent.events import append_router_event, read_router_events
+from router_agent.identity import can_approve, identify
 from router_agent.netmap import build_map
 
 CONFIG_PATH = Path(os.getenv("NETWORK_AI_CONFIG", BASE_DIR / "config.yml"))
@@ -37,6 +40,7 @@ FRONTEND_DIST = Path(__file__).resolve().parent / "frontend" / "dist"
 
 # Tshoot troubleshooting agent: separate service in /opt/tshoot, proxied under /api/tshoot/*
 TSHOOT_URL = os.getenv("TSHOOT_URL", "http://127.0.0.1:8090")
+TSHOOT_PROXY_KEY = os.getenv("TSHOOT_PROXY_KEY", "")  # shared with /opt/tshoot/.env
 
 STALE_LOCK_SECONDS = 900  # safety net: self-heal if a watcher thread died without cleaning up
 
@@ -70,6 +74,50 @@ def _lock_path() -> Path:
 
 def _last_result_path() -> Path:
     return log_dir() / ".collect_last_result.json"
+
+
+# "Check now" in production: the dashboard runs unprivileged and must not SSH to the router
+# itself, so it touches a trigger file that network-ai-check.path watches; systemd then
+# starts the normal check unit (as root). Without that path unit (development, other
+# installs) it falls back to running the check script as a subprocess.
+CHECK_UNIT = "network-ai-check.service"
+TRIGGER_FILE = ".collect-request"
+TRIGGER_PENDING_SECONDS = 30
+
+
+def _systemd_mode() -> bool:
+    try:
+        r = subprocess.run(["systemctl", "is-enabled", "network-ai-check.path"], check=False, capture_output=True, text=True, timeout=5)
+        return r.stdout.strip() == "enabled"
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _unit_status() -> dict:
+    out = subprocess.run(
+        ["systemctl", "show", CHECK_UNIT, "--timestamp=unix", "-p", "ActiveState", "-p", "Result",
+         "-p", "ExecMainStartTimestamp", "-p", "ExecMainExitTimestamp", "-p", "ExecMainStatus"],
+        capture_output=True, text=True, timeout=5, check=True).stdout
+    props = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+
+    def ts(key):
+        v = props.get(key, "").lstrip("@")
+        return datetime.fromtimestamp(int(v), UTC) if v.isdigit() and int(v) else None
+
+    started, finished = ts("ExecMainStartTimestamp"), ts("ExecMainExitTimestamp")
+    running = props.get("ActiveState") in ("activating", "active", "reloading", "deactivating")
+    trig = log_dir() / TRIGGER_FILE
+    if not running and trig.exists():  # requested, systemd hasn't started it yet
+        t = datetime.fromtimestamp(trig.stat().st_mtime, UTC)
+        if (started is None or t > started) and (datetime.now(UTC) - t).total_seconds() < TRIGGER_PENDING_SECONDS:
+            running, started = True, t
+    iso = lambda t: t.isoformat(timespec="seconds") if t else None
+    return {
+        "running": running,
+        "started_at": iso(started),
+        "finished_at": None if running else iso(finished),
+        "last_result": None if running else ("ok" if props.get("Result") == "success" and props.get("ExecMainStatus") == "0" else "error"),
+    }
 
 
 def _run_collect_background():
@@ -256,46 +304,27 @@ def api_network_map():
     return jsonify(build_map(snap, known if isinstance(known, dict) else {}, load_config()))
 
 
-CONNMON_CACHE_SECONDS = 120  # connmon writes a new row every 5 min; don't SSH on every page poll
-_connmon_cache: dict = {}
-
-
 @app.route("/api/connmon")
 def api_connmon():
-    """Ping/jitter/line-quality rows from the router's connmon SQLite DB (live, via SSH)."""
+    """Ping/jitter/line-quality points from the router's connmon DB. The 5-minute check
+    copies the last 7 days into logs/connmon.json, so the dashboard never SSHes itself."""
     hours = max(1, min(request.args.get("hours", default=24, type=int), 24 * 7))
-    cached = _connmon_cache.get(hours)
-    if cached and time.time() - cached[0] < CONNMON_CACHE_SECONDS:
-        return jsonify(cached[1])
-
-    r = load_config()["routers"][0]
-    sql = (f"SELECT Timestamp, Ping, Jitter, LineQuality FROM connstats "
-           f"WHERE Timestamp > strftime('%s','now','-{hours} hours') ORDER BY Timestamp")
-    collector = SSHCollector(host=r["host"], port=r.get("port", 22), username=r.get("username"),
-                             password=r.get("password"), key_filename=r.get("key_filename"))
-    try:
-        out = collector.run_command(f"sqlite3 -separator '|' {CONNMON_DB} \"{sql}\"", timeout=20)["out"]
-    except Exception as e:
-        return jsonify({"points": [], "available": False, "error": str(e)})
-    finally:
-        collector.close()
-
-    points = []
-    for line in out.splitlines():
-        parts = line.split("|")
-        if len(parts) == 4:
-            try:
-                points.append({"ts": int(float(parts[0])), "ping": float(parts[1]),
-                               "jitter": float(parts[2]), "quality": float(parts[3])})
-            except ValueError:
-                continue
-    payload = {"points": points, "available": True, "hours": hours}
-    _connmon_cache[hours] = (time.time(), payload)
-    return jsonify(payload)
+    data = read_json(log_dir() / "connmon.json")
+    if not data:
+        return jsonify({"points": [], "available": False, "hours": hours, "error": "no connmon data yet"})
+    cutoff = time.time() - hours * 3600
+    points = [p for p in data.get("points", []) if p.get("ts", 0) > cutoff]
+    return jsonify({"points": points, "available": True, "hours": hours, "fetched_at": data.get("fetched_at")})
 
 
 @app.route("/api/collect-now", methods=["POST"])
 def api_collect_now():
+    if _systemd_mode():
+        st = _unit_status()
+        if st["running"]:
+            return jsonify({"status": "already_running", "started_at": st["started_at"]}), 409
+        (log_dir() / TRIGGER_FILE).write_text(datetime.now(UTC).isoformat(timespec="seconds"))
+        return jsonify({"status": "started", "started_at": datetime.now(UTC).isoformat(timespec="seconds")}), 202
     lp = _lock_path()
     existing = read_json(lp)
     if existing:
@@ -314,6 +343,11 @@ def api_collect_now():
 
 @app.route("/api/collect-status")
 def api_collect_status():
+    if _systemd_mode():
+        try:
+            return jsonify(_unit_status())
+        except (OSError, subprocess.SubprocessError) as e:
+            return jsonify({"running": False, "started_at": None, "finished_at": None, "last_result": "error", "error": str(e)})
     lp = _lock_path()
     lock = read_json(lp)
     last_result = read_json(_last_result_path()) or {}
@@ -325,15 +359,39 @@ def api_collect_status():
     })
 
 
+def _identity() -> dict:
+    return identify(request.environ, request.headers)
+
+
+@app.route("/api/whoami")
+def api_whoami():
+    """Who the dashboard sees (via Tailscale serve) and whether they may approve Tshoot changes."""
+    ident = _identity()
+    ok, why = can_approve(ident, (load_config().get("dashboard") or {}).get("approvers"))
+    return jsonify({**ident, "can_approve": ok, "reason": why or None})
+
+
 @app.route("/api/tshoot/<path:sub>", methods=["GET", "POST"])
 def api_tshoot_proxy(sub):
+    headers = {"Content-Type": request.headers.get("Content-Type", "application/json")}
+    if TSHOOT_PROXY_KEY:  # Tshoot only answers requests that came through this proxy
+        headers["X-Tshoot-Proxy-Key"] = TSHOOT_PROXY_KEY
+    ident = _identity()
+    if ident.get("login"):
+        headers["X-Tshoot-User"] = f"{ident['login']} on {ident.get('device') or ident.get('ip') or '?'}"
+    if sub == "approve" and request.method == "POST":
+        body = request.get_json(silent=True) or {}
+        if body.get("decision") == "approve":  # rejecting is always allowed
+            ok, why = can_approve(ident, (load_config().get("dashboard") or {}).get("approvers"))
+            if not ok:
+                return jsonify({"error": f"Not approved: {why}"}), 403
     try:
         upstream = requests.request(
             request.method,
             f"{TSHOOT_URL}/api/tshoot/{sub}",
             params=request.args,
             data=request.get_data(),
-            headers={"Content-Type": request.headers.get("Content-Type", "application/json")},
+            headers=headers,
             stream=True,
             timeout=(5, 600),
         )
@@ -355,6 +413,11 @@ def api_tshoot_proxy(sub):
 
 
 if __name__ == "__main__":
-    cfg = load_config()
-    dash_cfg = cfg.get("dashboard", {})
-    app.run(host=dash_cfg.get("host", "0.0.0.0"), port=dash_cfg.get("port", 8080))
+    dash_cfg = load_config().get("dashboard", {})
+    if "--dev" in sys.argv:  # Flask's development server, single TCP listener
+        app.run(host=dash_cfg.get("host", "127.0.0.1"), port=dash_cfg.get("port", 8080), threaded=True)
+    else:
+        # dashboard/serve.py; this script's directory is on sys.path
+        from serve import run
+
+        run(app, dash_cfg)

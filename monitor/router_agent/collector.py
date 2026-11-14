@@ -1,6 +1,8 @@
 
 import paramiko
 
+from .upnp import UPNP_CMD
+
 # Log layout. With scribe (syslog-ng on the USB stick) the main log is
 # /opt/var/log/messages (/jffs/syslog.log symlinks to it), firewall drops and
 # Skynet blocks go to skynet-0.log and wlceventd chatter to wlceventd.log.
@@ -28,6 +30,12 @@ SKYNET_SETS_CMD = (
 # connmon (ping/jitter/line quality every 5 min) and spdMerlin (daily speedtest)
 # keep SQLite databases; aggregate on the router so only a few numbers come back.
 CONNMON_DB = "/jffs/addons/connmon.d/connstats.db"
+# the last 7 days of connmon points for the dashboard's chart (logs/connmon.json, written by each check)
+CONNMON_POINTS_CMD = (
+    f"[ -f {CONNMON_DB} ] && sqlite3 -separator '|' {CONNMON_DB} \""
+    "SELECT Timestamp, Ping, Jitter, LineQuality FROM connstats "
+    "WHERE Timestamp > strftime('%s','now','-7 days') ORDER BY Timestamp\""
+)
 CONNMON_CMD = (
     f"[ -f {CONNMON_DB} ] && sqlite3 -separator '|' {CONNMON_DB} \""
     "SELECT COUNT(*), ROUND(AVG(Ping),2), ROUND(MAX(Ping),2), ROUND(AVG(Jitter),2), ROUND(MAX(Jitter),2), "
@@ -122,6 +130,7 @@ COMMAND_GROUPS: dict[str, list[str]] = {
     ],
     "services": [
         SERVICES_CMD,
+        UPNP_CMD,  # port mappings devices opened via UPnP / NAT-PMP (router_agent/upnp.py)
     ],
 }
 
