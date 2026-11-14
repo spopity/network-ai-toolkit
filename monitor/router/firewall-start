@@ -1,0 +1,18 @@
+#!/bin/sh
+# Merlin hook /jffs/scripts/firewall-start: called (with the WAN interface as $1)
+# after the firmware has (re)built its iptables rules, e.g. at boot, on WAN up and
+# on `service restart_firewall`.
+# Source of truth: /opt/network-ai/router/firewall-start
+#   install: ssh admin@192.168.1.1 'cat > /jffs/scripts/firewall-start && chmod 755 /jffs/scripts/firewall-start' < router/firewall-start
+
+sh /jffs/scripts/firewall start skynetloc=/tmp/mnt/entware/skynet # Skynet
+iptables -D SDN_IA -i br0 -o br54 -j ACCEPT 2>/dev/null
+iptables -I SDN_IA 1 -i br0 -o br54 -j ACCEPT
+
+# network-ai (router_agent/iotlan.py): log IoT -> LAN connection attempts before the
+# SDN rule drops them. Rate-limited; prefix "DROP " so scribe files them with the
+# other firewall drops (skynet-0.log). Delete-then-insert keeps exactly one copy.
+iptables -D SDN_IA -i br54 -o br0 -m limit --limit 10/min --limit-burst 30 -j LOG --log-prefix "DROP " 2>/dev/null
+iptables -I SDN_IA 1 -i br54 -o br0 -m limit --limit 10/min --limit-burst 30 -j LOG --log-prefix "DROP "
+
+[ -x /jffs/addons/AdGuardHome.d/AdGuardHome.sh ] && /jffs/addons/AdGuardHome.d/AdGuardHome.sh firewall "$1"

@@ -1,0 +1,10 @@
+[Unit]
+Description=Monthly network report (last calendar month, UTC), after the daily run
+
+[Timer]
+OnCalendar=*-*-01 05:00:00
+Persistent=true
+Unit=network-ai-report@month.service
+
+[Install]
+WantedBy=timers.target

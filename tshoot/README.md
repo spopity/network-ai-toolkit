@@ -99,9 +99,27 @@ cp config.example.yml config.yml && cp .env.example .env   # fill in
 .venv/bin/python -m pytest            # policy, redaction + Claude access tests
 .venv/bin/python -m tshoot.app        # foreground
 
+# unprivileged service user with its own router key (never root or root's key)
+sudo useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin tshoot
+sudo install -d -m 700 state/ssh && sudo ssh-keygen -t ed25519 -N '' -C tshoot@network-ai -f state/ssh/id_ed25519
+sudo chown -R tshoot:tshoot logs state && sudo chgrp tshoot .env && sudo chmod 640 .env
+# authorize the key on the router: the persisted list (services-start copies it at boot) + the live file
+ssh admin@192.168.1.1 'cat >> /jffs/network-ai/authorized_keys && cat /jffs/network-ai/authorized_keys > /home/root/.ssh/authorized_keys' < state/ssh/id_ed25519.pub
+
 sudo cp systemd/tshoot.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now tshoot.service
 ```
+
+The service runs as user `tshoot` inside a systemd sandbox (`systemd-analyze
+security tshoot.service` ≈ 1.7): the filesystem is read-only except `logs/` and
+`state/`, there are no capabilities, no privilege escalation, and a
+`@system-service` syscall filter. `SupplementaryGroups=netai` lets it read
+network-ai's `logs/latest.json` and `watchdog_status.json` (still read-only under
+`ProtectSystem=strict`). It reaches the router with its own key
+(`config.yml` `router.key_filename`), so revoking Tshoot means deleting the
+`tshoot@network-ai` line from `/jffs/network-ai/authorized_keys` and
+`/home/root/.ssh/authorized_keys` on the router. The router user is still the
+admin account, so the approval flow (`policy.py`) remains what limits changes.
 
 Conversations live in memory (6 h idle TTL), and the browser keeps its own
 copy. After a restart, a conversation continues from the browser's text

@@ -28,7 +28,7 @@ except OSError:
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
-from router_agent import db, notify
+from router_agent import db, notify, report
 from router_agent.devices import device_names, name_analysis
 from router_agent.events import append_router_event, read_router_events
 from router_agent.identity import can_approve, identify
@@ -278,6 +278,49 @@ def api_traffic_devices():
         return jsonify({"available": True, "hours": hours, "devices": db.get_traffic_devices(hours, arg("network"))})
     except Exception as e:
         return jsonify({"available": False, "hours": hours, "devices": [], "error": str(e)})
+
+
+def _history_args():
+    days = max(1, min(request.args.get("days", default=90, type=int), 3650))
+    bucket = request.args.get("bucket", "day")
+    blank = lambda k: (request.args.get(k) or "").strip() or None
+    return days, (bucket if bucket in db.HISTORY_BUCKETS else "day"), blank
+
+
+@app.route("/api/traffic/history")
+def api_traffic_history():
+    """Long-range internet usage (?days=365&bucket=day|week|month&device=&network=): totals per
+    period + top devices, from the daily summaries (kept after raw rows are pruned)."""
+    days, bucket, arg = _history_args()
+    try:
+        data = db.get_traffic_history(days, bucket, device=arg("device"), network=arg("network"))
+        return jsonify({"available": True, "days": days, "bucket": bucket, **data})
+    except Exception as e:
+        return jsonify({"available": False, "days": days, "bucket": bucket, "series": [], "devices": [],
+                        "error": str(e)})
+
+
+@app.route("/api/dns/history")
+def api_dns_history():
+    """Long-range DNS totals (?days=365&bucket=day|week|month&device=&network=): queries/blocked
+    per period + top devices. No domain names (those stay in the 90-day raw archive)."""
+    days, bucket, arg = _history_args()
+    try:
+        data = db.get_dns_history(days, bucket, device=arg("device"), network=arg("network"))
+        return jsonify({"available": True, "days": days, "bucket": bucket, **data})
+    except Exception as e:
+        return jsonify({"available": False, "days": days, "bucket": bucket, "series": [], "devices": [],
+                        "error": str(e)})
+
+
+@app.route("/api/reports")
+def api_reports():
+    """Saved weekly/monthly reports, newest first (?period=week|month&limit=4). Files only
+    (logs/reports/), so this works without Postgres."""
+    period = request.args.get("period")
+    period = period if period in report.PERIODS else None
+    limit = max(1, min(request.args.get("limit", default=4, type=int), 24))
+    return jsonify({"reports": report.latest(log_dir(), period, limit)})
 
 
 @app.route("/api/traffic/detail")

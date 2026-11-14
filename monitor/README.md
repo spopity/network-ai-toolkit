@@ -17,7 +17,7 @@ connection after a sustained outage.
 - `router_agent/events.py` + `router/wan-event` — the router pushes its own WAN state changes: `router/wan-event` is installed on the router as the Merlin hook `/jffs/scripts/wan-event` and POSTs to the dashboard's `/api/router-event` (accepted only from the configured router IPs). Events land in `logs/router_events.log` and the Postgres `watchdog_events` table as `router_wan_<event>`, show up in the dashboard's events table, and the last 24h are fed to the LLM's system analysis.
 - `collect_and_analyze.py` — one-shot, two modes. `--mode check` (default; every 5 minutes via `network-ai-check.timer`, and the dashboard's "Check now" button): collect → summarize → track wifi clients → fold into the 24h rollup → store. **Never calls an LLM.** `--mode daily` (once a day via `network-ai-collect.timer`, 03:00 UTC — this machine's timezone is `Etc/UTC`; edit the timer's `OnCalendar=` if that's not your night): the same check, then the **only** LLM pass of the day, over the rollup, then a fresh rollup starts. Runs are serialized with `logs/.run.lock`; check records carry the last daily analysis forward in `latest.json`.
 - `router_agent/rollup.py` — day-long aggregation of the checks (`logs/rollup.json`). Each check keeps only the log lines newer than the previous check (timestamp cursor in `logs/.log_cursor.json`, so overlapping tails are never double-counted) and merges their syslog templates and firewall-drop counters, plus peaks/minimums (load, memory, temperatures, wifi clients, WAN-down checks, router reboots). The daily analysis renders it into the LLM's input (`day_summary` in the daily record).
-- Storage: daily records `logs/<router>-<ts>.json` (kept `retention_days`), checks gzipped in `logs/checks/` (kept `check_retention_hours`, ~9 KB each). Postgres gets every check too (`kind='check'`, raw log tails stripped); `/api/history` thins checks to ~hourly beyond 2 days. **Postgres retention**: the daily run deletes 5-minute snapshots, `dns_lookups` and `traffic_usage` rows older than `db_retention_days` (default 90; 0 = keep forever; values under 7 are refused), via `db.prune_old()` / `RETENTION_TABLES`. Kept forever: daily analyses, `watchdog_events`, `dns_devices`/`dns_first_seen` (the "new domain" detection needs every domain a device ever used) and Tshoot's `tshoot_audit`. A plain `DELETE`, not a TimescaleDB policy, so it works on any Postgres; steady state is roughly 500 MB. New wifi clients come from `logs/known_clients.json` (a client counts as new for 24 h after it first appears; devices unseen for `retention_days` are forgotten).
+- Storage: daily records `logs/<router>-<ts>.json` (kept `retention_days`), checks gzipped in `logs/checks/` (kept `check_retention_hours`, ~9 KB each). Postgres gets every check too (`kind='check'`, raw log tails stripped); `/api/history` thins checks to ~hourly beyond 2 days. **Postgres retention**: the daily run deletes 5-minute snapshots, `dns_lookups` and `traffic_usage` rows older than `db_retention_days` (default 90; 0 = keep forever; values under 7 are refused), via `db.prune_old()` / `RETENTION_TABLES`. Kept forever: daily analyses, `watchdog_events`, `dns_devices`/`dns_first_seen` (the "new domain" detection needs every domain a device ever used) and Tshoot's `tshoot_audit`. Works on any Postgres (plain `DELETE`). **With TimescaleDB** (installed in the `network_ai` database since 2026-11-14) the daily run's `db.ensure_timescale()` also sets up, once and idempotently: `dns_lookups` and `traffic_usage` as hypertables (7-day chunks, compressed once 14 days old, because the Traffic Analyzer catch-up writes up to 2 weeks back), retention by whole chunks (`drop_chunks`, never inside the 30-day summary refresh window), and the daily per-device summaries `traffic_daily` (rx/tx) and `dns_daily` (queries/blocked), refreshed hourly and **kept forever**. The summaries deliberately carry no domain or app names, so the hidden list can't outlive a purge in them. Long-range API: `/api/traffic/history` and `/api/dns/history` (`?days=365&bucket=day|week|month&device=&network=`, totals per period + top devices; on plain Postgres they read the raw tables instead). `snapshots` stays a plain table: its daily rows (the LLM analyses) must survive while check rows are deleted. New wifi clients come from `logs/known_clients.json` (a client counts as new for 24 h after it first appears; devices unseen for `retention_days` are forgotten).
 - `router_agent/notify.py` — Telegram push notifications (see "Telegram notifications").
 - `watchdog.py` — continuous connectivity monitor; restarts WAN (`service restart_wan_if <unit>`) after `down_threshold_seconds` of outage, with a cooldown between attempts. Supports `--dry-run` and `--max-iterations` for safe testing.
 - `dashboard/app.py` — Flask backend: serves the built React app as static files, `/api/state` (live), `/api/history` (Postgres-backed trends), `/api/collect-now` + `/api/collect-status` (on-demand trigger).
@@ -264,6 +264,8 @@ reconfigure in the web UI and look values up with `gzip -dc $B/nvram.txt.gz | gr
 | `monitor` | network-ai itself is unhealthy, and again when fixed (see "Monitoring the monitor") | watchdog / 5-minute check |
 | `anomaly` | an appliance contacts many new sites in an hour or uploads far more than usual (see "Unusual device behaviour") | 5-minute check |
 | `upnp` | a device opens a port to the internet via UPnP **for the first time** (see "UPnP port mappings") | 5-minute check |
+| `report` | the weekly (Mondays) / monthly (1st) network report: key numbers + AI summary; opt-in (`router_agent/report.py`, `network-ai-report-{weekly,monthly}.timer`, Report card on Monitor, `/api/reports`) | report timer |
+| `iot_lan` | an IoT device tries to open a connection to a LAN device (blocked by the firewall; see "IoT devices reaching for the LAN") | 5-minute check |
 | `daily` | opt-in (not sent unless listed): the daily LLM briefing's one-line overall summary (or that it failed) | `--mode daily` |
 
 WAN down is not pushed while it happens -- Telegram is unreachable then; the
@@ -299,6 +301,7 @@ every 5 minutes; the 5-minute check watches the watchdog, so each guards the oth
 | disk | under 10 % free on the disk holding `logs/` | — |
 | watchdog | `logs/watchdog_status.json` older than 5 min (checked by the 5-minute check) | — |
 | traffic | no new Traffic Analyzer rows for 3 h (when `traffic_analyzer:` is on) | — |
+| iot_lan | the router's IoT → LAN LOG rule is missing (when `iot_lan:` is on; see "IoT devices reaching for the LAN") | — |
 
 A problem that outlasts its grace records one `monitor_problem` event (Events card,
 Postgres, Telegram `monitor`); when it clears, one `monitor_ok`. Short blips inside
@@ -328,6 +331,41 @@ a day as an `anomaly` event (Events card, Postgres, Telegram `anomaly`); the fir
 records what is going on silently. Thresholds and `ignore_devices` (names or MACs that
 may do this): `anomaly:` in `config.example.yml`. State: `logs/.anomaly_state.json`.
 The baseline needs the DNS archive (AdGuardHome) and/or the Traffic Analyzer archive.
+
+## IoT devices reaching for the LAN
+
+The router's SDN firewall already blocks the IoT network (`br54`, 192.168.107.x) from
+opening connections to the LAN (`br0`): chain `SDN_IA` drops `br+ -> br+` except
+LAN -> IoT (re-inserted by `firewall-start`). Merlin's `logdrop` drops silently, so
+`router/firewall-start` also inserts a **rate-limited LOG rule** (10/min, burst 30,
+prefix `DROP `) for `br54 -> br0` in front of it. Scribe files those lines with the other
+firewall drops in `skynet-0.log`; they never enter the syslog the LLM sees. Replies to
+connections the LAN opened are ESTABLISHED and never logged, and broadcast/multicast
+discovery isn't forwarded, so each line is a real attempt by an IoT device to reach a
+LAN device.
+
+Every 5-minute check (`router_agent/iotlan.py`, on when `iot_lan:` is in config.yml)
+reads only the lines past its cursor (`logs/.iot_lan_state.json`; the first run sets
+the cursor silently), names both ends like the rest of the dashboard and puts the
+check's attempts in `snapshot.iot_lan` (plus `logging`: is the LOG rule installed?).
+Each (IoT device, LAN target, port) alerts at most once a day: one `iot_lan` event per
+device (Events card, Postgres, Telegram `iot_lan`). Expected traffic (a plug talking to a
+LAN MQTT broker, say) goes in `iot_lan.ignore_targets` / `ignore_devices`. If a firewall
+rebuild drops the LOG rule without running `firewall-start`, the self-check reports
+`IoT → LAN logging` as a `monitor` problem.
+
+Install / update the hook (file write only; applying the two LOG lines by hand avoids
+re-running Skynet's `firewall start`):
+
+```bash
+ssh admin@192.168.1.1 'cat > /jffs/scripts/firewall-start && chmod 755 /jffs/scripts/firewall-start' < router/firewall-start
+ssh admin@192.168.1.1 'iptables -D SDN_IA -i br54 -o br0 -m limit --limit 10/min --limit-burst 30 -j LOG --log-prefix "DROP " 2>/dev/null;
+  iptables -I SDN_IA 1 -i br54 -o br0 -m limit --limit 10/min --limit-burst 30 -j LOG --log-prefix "DROP "'
+ssh admin@192.168.1.1 'iptables -vnL SDN_IA'   # the LOG rule's counter = attempts seen
+```
+
+Only IoT -> LAN is watched: IoT devices hitting the router's own LAN address (e.g.
+ASUS port 18018 discovery) and Guest -> LAN are dropped by other rules and not logged.
 
 ## UPnP port mappings (internet exposure)
 
@@ -420,6 +458,33 @@ WireGuard peers, AiProtection, QoS, connmon, spdMerlin, scribe, ...). Neither is
 - Links: Wi-Fi (band + signal), cable, VPN (WireGuard handshake < 3 min), "seen" (answers
   ARP but on no node's list). Proxmox guests missing from the wired lists are drawn behind
   the same node as the other guests ("inferred").
+
+## Weekly and monthly reports
+
+`router_agent/report.py` writes a short report about the last full week (Monday to Sunday,
+UTC; `network-ai-report-weekly.timer`, Mondays 04:30 UTC) and the last calendar month
+(`network-ai-report-monthly.timer`, the 1st at 05:00 UTC), both after the 03:00 daily run.
+Each is **one** LLM call (same `llm.order` fallback as the daily analysis) over compact
+facts with the previous period for comparison:
+
+- internet: WAN-up share of the 5-minute checks, outages the watchdog measured, auto-restarts,
+  router reboots; spdMerlin speedtests and connmon ping/jitter
+- traffic and DNS totals per day and the top devices (from the daily summaries, so they work
+  after the raw rows are pruned); new devices from `known_clients.json`; notable router
+  events (anomaly, UPnP, IoT→LAN, monitor problems, DNS down, firmware)
+
+Per device only: no domain or app names, so the hidden list can't end up in a report.
+Saved as `logs/reports/<week|month>-<start>.json`, shown in the **Report** card on Monitor
+(Week/Month switch, `/api/reports?period=week&limit=1`) and pushed to Telegram as `report`
+(opt-in: add it to `notify.events`). Missing Postgres → those facts are listed as missing;
+no LLM → the report keeps the numbers.
+
+```bash
+.venv/bin/python3 -m router_agent.report --period week --dry-run   # facts only: no LLM, nothing saved
+.venv/bin/python3 -m router_agent.report --period week --no-send   # write it, don't push to Telegram
+sudo cp systemd/network-ai-report@.service systemd/network-ai-report-*.timer /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now network-ai-report-weekly.timer network-ai-report-monthly.timer
+```
 
 ## Tests
 

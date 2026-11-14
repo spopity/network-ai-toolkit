@@ -81,7 +81,7 @@ dashboard:
 # notify:
 #   telegram:
 #     chat_id: "123456789"
-#   events: [wan, dns, new_device, firmware, upnp, monitor, anomaly]   # the default; add `daily` for the LLM briefing summary
+#   events: [wan, dns, new_device, firmware, upnp, monitor, anomaly, iot_lan]   # the default; add `daily` (LLM briefing summary) and/or `report` (weekly/monthly report)
 #   wan_min_downtime_seconds: 60                        # shorter outages are not pushed
 #   timezone: Europe/Berlin                             # times in messages (default: host's)
 #   dashboard_url: http://my-host.tailnet.ts.net:8080   # optional link under each message
@@ -116,3 +116,11 @@ dashboard:
 #   min_history_hours: 72      # baseline needed before a device is judged
 #   cooldown_hours: 24         # one alert per device and kind per day
 #   ignore_devices: []         # device names or MACs that may do this
+
+# Optional: IoT devices trying to open connections to the LAN (router_agent/iotlan.py).
+# Needs the LOG rule from router/firewall-start on the router (IoT = br54, LAN = br0).
+# Present (even empty: `iot_lan: {}`) = on; these are the defaults.
+# iot_lan:
+#   cooldown_hours: 24         # one alert per IoT device, LAN target and port per day
+#   ignore_devices: []         # IoT device names, IPs or MACs that may do this
+#   ignore_targets: []         # LAN side: "192.168.1.10", "192.168.1.10:1883" or "homeassistant:8123"

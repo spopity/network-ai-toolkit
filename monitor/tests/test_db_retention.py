@@ -9,7 +9,11 @@ class FakeCursor:
         self.sql, self.rowcount = [], rowcount
 
     def execute(self, sql, params=None):
-        self.sql.append((sql, params))
+        if "pg_extension" not in sql:  # TimescaleDB probe: plain Postgres here (test_db_timescale.py)
+            self.sql.append((sql, params))
+
+    def fetchone(self):
+        return None
 
 
 def fake_db(monkeypatch, cur):

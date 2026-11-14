@@ -19,14 +19,13 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from router_agent import anomaly, db, notify, selfcheck, upnp
-from router_agent.claude_client import ClaudeClient
+from router_agent import anomaly, db, iotlan, notify, selfcheck, upnp
 from router_agent.collector import CONNMON_POINTS_CMD, SSHCollector
 from router_agent.devices import device_names
 from router_agent.dnshealth import DnsHealth
 from router_agent.dnslog import DEFAULT_NETWORKS, DnsLog, Namer
 from router_agent.events import read_router_events, watchdog_summary
-from router_agent.llm_client import GeminiClient, LLMRouter, OllamaClient
+from router_agent.llm_client import build_router
 from router_agent.netmap import lan_snapshot, parse_services
 from router_agent.rollup import Rollup
 from router_agent.rollup import render as render_rollup
@@ -86,21 +85,7 @@ def main():
 
     router_llm = None
     if args.mode == "daily":
-        llm_cfg = cfg.get("llm", {})
-        backends = []
-        for b in llm_cfg.get("order") or ["gemini", "ollama"]:
-            bcfg = llm_cfg.get(b) or {}
-            if b == "claude":
-                if ClaudeClient.configured():
-                    backends.append((b, ClaudeClient(model=bcfg.get("model", "opus"), timeout=bcfg.get("timeout", 180))))
-            elif b == "gemini":
-                backends.append((b, GeminiClient(timeout=bcfg.get("timeout", 20))))
-            elif b == "ollama":
-                if bcfg.get("url") and bcfg.get("model"):  # no guessed defaults: set both in config.yml
-                    backends.append((b, OllamaClient(url=bcfg["url"], model=bcfg["model"], timeout=bcfg.get("timeout", 180))))
-            else:
-                print(f"warning: unknown llm backend {b!r} in llm.order, ignored", file=sys.stderr)
-        router_llm = LLMRouter(backends)
+        router_llm = build_router(cfg, warn=lambda m: print(m, file=sys.stderr))
 
     exit_code = 0
     for r in cfg.get("routers", []):
@@ -134,6 +119,17 @@ def main():
         names = {**namer.names, **{namer.ip_mac[ip]: a for ip, a in (adg.get("aliases") or {}).items() if ip in namer.ip_mac}}
         snapshot["upnp"] = upnp.check_and_record(store.base, _out(grouped.get("services", []), UPNP_CMD),
                                                  namer.ip_mac, names)
+        if cfg.get("iot_lan") is not None:
+            # IoT devices trying to open connections to the LAN (blocked + logged by the router) -> event + Telegram
+            try:
+                snapshot["iot_lan"] = iotlan.check_and_record(store.base, cfg["iot_lan"],
+                                                              _out(grouped.get("services", []), iotlan.IOT_LAN_CMD),
+                                                              Namer(store.base, snapshot, grouped,
+                                                                    adg.get("networks") or DEFAULT_NETWORKS,
+                                                                    adg.get("aliases")))
+            except Exception as e:
+                print(f"[{name}] iot_lan failed: {e}", file=sys.stderr)
+                snapshot["iot_lan"] = None
         hidden = cfg.get("hidden") or {}  # never archived: DNS domains (+ subdomains), Traffic Analyzer apps
         if cfg.get("adguard"):
             # per-device DNS lookups from AdGuardHome (archived in Postgres; summary only here)
@@ -183,6 +179,10 @@ def main():
         store.prune()
 
     if args.mode == "daily":
+        # TimescaleDB (when installed): hypertables, compression, daily summaries -- once, then no-ops
+        steps = db.ensure_timescale()
+        if steps:
+            print(f"postgres timescale setup: {', '.join(steps)}")
         # Postgres retention: 5-minute snapshots, DNS lookups and traffic older than N days
         deleted = db.prune_old(cfg.get("db_retention_days", 90))
         if deleted is not None:

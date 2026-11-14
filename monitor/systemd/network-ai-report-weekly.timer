@@ -1,0 +1,10 @@
+[Unit]
+Description=Weekly network report (last Monday-Sunday, UTC), after the daily run
+
+[Timer]
+OnCalendar=Mon *-*-* 04:30:00
+Persistent=true
+Unit=network-ai-report@week.service
+
+[Install]
+WantedBy=timers.target

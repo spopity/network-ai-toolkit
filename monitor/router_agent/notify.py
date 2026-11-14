@@ -17,6 +17,8 @@ What is sent (each can be switched off with `notify.events` in config.yml):
   upnp        a device opened a port to the internet via UPnP for the first time
               (router_agent/upnp.py; known devices re-opening ports stay quiet)
   daily       the daily LLM briefing's one-line overall summary (opt-in: not in the default list)
+  report      the weekly / monthly network report: key numbers + AI summary (opt-in;
+              router_agent/report.py)
 
 Best-effort like the Postgres archive: sending never raises, so a Telegram outage
 can't fail a check, the watchdog or an API call. Messages that could not be
@@ -49,8 +51,8 @@ LOCK_FILE = ".notify.lock"
 QUEUE_MAX = 50                       # oldest dropped beyond this
 QUEUE_MAX_AGE = timedelta(days=2)    # older undelivered messages are dropped, not sent
 TIMEOUT = 10
-ALL_EVENTS = ("wan", "dns", "new_device", "firmware", "upnp", "monitor", "anomaly", "daily")
-DEFAULT_EVENTS = ("wan", "dns", "new_device", "firmware", "upnp", "monitor", "anomaly")  # major events only
+ALL_EVENTS = ("wan", "dns", "new_device", "firmware", "upnp", "monitor", "anomaly", "iot_lan", "daily", "report")
+DEFAULT_EVENTS = ("wan", "dns", "new_device", "firmware", "upnp", "monitor", "anomaly", "iot_lan")  # major events only
 
 _notifier = None  # set by configure(); every hook is a no-op without it
 
@@ -237,6 +239,16 @@ class Notifier:
             lines.append("Check it in the dashboard (DNS / Internet usage). Expected? Add the device to "
                          "anomaly.ignore_devices.")
             self.send("\n".join(lines) + self._footer())
+        elif kind == "iot_lan" and "iot_lan" in self.events:
+            who = html.escape(event.get("device") or event.get("ip") or "?")
+            where = ", ".join(html.escape(x) for x in (event.get("ip"), event.get("mac")) if x and x != event.get("device"))
+            n = event.get("count") or 0
+            lines = [f"🚧 <b>IoT device {who} tried to reach the LAN</b>" + (f" ({where})" if where else ""),
+                     f"Blocked {n} connection attempt{'s' if n != 1 else ''}:"]
+            lines += [f"• {html.escape(t)}" for t in (event.get("targets") or [])[:10]]
+            lines.append("The firewall blocked it. Expected (e.g. a LAN MQTT broker)? Add it to "
+                         "iot_lan.ignore_targets; otherwise check the device.")
+            self.send("\n".join(lines) + self._footer())
         elif kind == "upnp_new_device" and "upnp" in self.events:
             who = html.escape(event.get("device") or event.get("ip") or "?")
             where = ", ".join(html.escape(x) for x in (event.get("ip"), event.get("mac")) if x and x != event.get("device"))
@@ -271,6 +283,19 @@ class Notifier:
         else:
             text = f"⚠️ <b>Daily router briefing failed</b>\n{html.escape((analysis.get('error') or 'no analysis')[:500])}"
         self.send(text + self._footer())
+
+    def report(self, record: dict) -> None:
+        if "report" not in self.events:
+            return
+        title = "Weekly" if record.get("period") == "week" else "Monthly"
+        lines = [(f"📊 <b>{title} network report</b> "
+                 f"({html.escape(str(record.get('start')))} – {html.escape(str(record.get('end')))})")]
+        lines += [html.escape(x) for x in record.get("headline") or []]
+        if record.get("summary"):
+            lines += ["", html.escape(record["summary"][:2500])]
+        else:
+            lines += ["", f"(no AI summary: {html.escape((record.get('error') or 'no LLM answered')[:300])})"]
+        self.send("\n".join(lines) + self._footer())
 
 
 def duration(seconds: float) -> str:

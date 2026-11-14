@@ -5,12 +5,45 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# unprivileged: its own user and its own router SSH key (state/ssh/id_ed25519),
+# never root or root's key
+User=tshoot
+Group=tshoot
+# read-only access to network-ai's logs/ (latest.json, watchdog_status.json);
+# ProtectSystem=strict keeps it read-only even though the group may write
+SupplementaryGroups=netai
 WorkingDirectory=/opt/tshoot
 Environment=TSHOOT_CONFIG=/opt/tshoot/config.yml
+Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStart=/opt/tshoot/.venv/bin/python3 -m tshoot.app
 Restart=always
 RestartSec=10
-User=root
+UMask=0077
+
+# sandbox: Tshoot only needs to read its project, write logs/ (audit) and state/
+# (Claude CLI config), SSH to the router and talk to Postgres, the dashboard and
+# the Gemini/Claude APIs
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/tshoot/logs /opt/tshoot/state
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
 
 [Install]
 WantedBy=multi-user.target

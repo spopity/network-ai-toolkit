@@ -11,6 +11,8 @@ The watchdog (always running) calls run() every few minutes for:
   disk       less than `disk_min_free_pct` (10 %) free where logs/ lives
   traffic    no new Traffic Analyzer rows for `traffic_max_age_hours` (3) while
              `traffic_analyzer:` is on: the router stopped writing its statistics
+  iot_lan    the router's IoT -> LAN LOG rule is gone while `iot_lan:` is on
+             (router_agent/iotlan.py; reinstalled by router/firewall-start)
 
 and the 5-minute check calls run(only=("watchdog",)) to watch the watchdog in turn
 (its status file older than 5 minutes = it died or hangs), so each guards the other.
@@ -39,7 +41,7 @@ STATE_FILE = ".selfcheck.json"
 TITLES = {
     "checks": "5-minute checks", "daily": "daily analysis", "backup": "router backup",
     "postgres": "Postgres archive", "dashboard": "dashboard", "disk": "disk space", "watchdog": "watchdog",
-    "traffic": "Traffic Analyzer data",
+    "traffic": "Traffic Analyzer data", "iot_lan": "IoT → LAN logging",
 }
 # alert only once a problem persisted this long (a restart or reboot would otherwise alert on stale
 # files that the next run refreshes); unlisted checks alert at once
@@ -150,6 +152,14 @@ def check_traffic(log_dir: Path, now: datetime, max_age: timedelta) -> str | Non
     return None
 
 
+def check_iot_lan(log_dir: Path) -> str | None:
+    snap = (_read(log_dir / "latest.json") or {}).get("snapshot") or {}
+    if (snap.get("iot_lan") or {}).get("logging") is False:
+        return ("the router's IoT → LAN LOG rule is missing (firewall restarted without "
+                "/jffs/scripts/firewall-start?): blocked attempts are no longer seen")
+    return None
+
+
 def check_watchdog(log_dir: Path, now: datetime) -> str | None:
     t = _parse_ts((_read(log_dir / "watchdog_status.json") or {}).get("checked_at"))
     if t is None or now - t > WATCHDOG_MAX_AGE:
@@ -172,6 +182,7 @@ def gather(cfg: dict, log_dir: Path, now: datetime, only=None, skip=()) -> dict[
         "watchdog": lambda: check_watchdog(log_dir, now),
         "traffic": lambda: check_traffic(log_dir, now, timedelta(hours=m.get("traffic_max_age_hours", 3)))
         if (cfg or {}).get("traffic_analyzer") else None,
+        "iot_lan": lambda: check_iot_lan(log_dir) if (cfg or {}).get("iot_lan") is not None else None,
     }
     out = {}
     for name, fn in checks.items():

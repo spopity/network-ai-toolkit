@@ -1,0 +1,12 @@
+[Unit]
+Description=Network AI - %i network report (one LLM call over the archive)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/network-ai
+ExecStart=/opt/network-ai/.venv/bin/python3 -m router_agent.report --config /opt/network-ai/config.yml --period %i
+User=root
+# logs/ is group netai (setgid) so the unprivileged dashboard can read the report
+UMask=0007

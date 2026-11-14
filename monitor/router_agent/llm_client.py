@@ -4,6 +4,7 @@ import re
 
 import requests
 
+from .claude_client import ClaudeClient
 from .devices import name_analysis, snapshot_names
 from .snapshot import wifi_client_macs
 from .summarize import split_by_section, summarize_text
@@ -290,3 +291,41 @@ class LLMRouter:
                 out["fallback_reason"] = "; ".join(errors)
             return name_analysis(out, names)
         return {"source": "none", "error": "; ".join(errors) or "no LLM backend configured", "sections": {}}
+
+    def ask(self, prompt: str, max_chars: int = 3000) -> dict:
+        """One free-form prompt (the weekly/monthly report) on the first backend that answers:
+        {"source", "text"[, "fallback_reason"]} or {"source": "none", "error"}."""
+        errors = []
+        for name, backend in self.backends:
+            try:
+                text = _clean_text(backend.analyze(prompt), max_chars=max_chars)
+            except Exception as e:
+                errors.append(f"{name} failed ({str(e)[:200]})")
+                continue
+            if not text:
+                errors.append(f"{name} returned nothing")
+                continue
+            out = {"source": name, "text": text}
+            if errors:
+                out["fallback_reason"] = "; ".join(errors)
+            return out
+        return {"source": "none", "error": "; ".join(errors) or "no LLM backend configured"}
+
+
+def build_router(cfg: dict, warn=None) -> LLMRouter:
+    """The backends of config.yml `llm.order` that are configured, in that order."""
+    llm_cfg = cfg.get("llm") or {}
+    backends = []
+    for b in llm_cfg.get("order") or ["gemini", "ollama"]:
+        bcfg = llm_cfg.get(b) or {}
+        if b == "claude":
+            if ClaudeClient.configured():
+                backends.append((b, ClaudeClient(model=bcfg.get("model", "opus"), timeout=bcfg.get("timeout", 180))))
+        elif b == "gemini":
+            backends.append((b, GeminiClient(timeout=bcfg.get("timeout", 20))))
+        elif b == "ollama":
+            if bcfg.get("url") and bcfg.get("model"):  # no guessed defaults: set both in config.yml
+                backends.append((b, OllamaClient(url=bcfg["url"], model=bcfg["model"], timeout=bcfg.get("timeout", 180))))
+        elif warn:
+            warn(f"warning: unknown llm backend {b!r} in llm.order, ignored")
+    return LLMRouter(backends)

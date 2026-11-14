@@ -72,6 +72,8 @@ def test_router_event_sanitizes_and_stores(client):
     ("/api/dns/lookups?hours=999999&limit=5", "lookups"),
     ("/api/traffic/devices", "devices"),
     ("/api/traffic/detail", "apps"),
+    ("/api/traffic/history?days=365&bucket=week", "series"),
+    ("/api/dns/history", "devices"),
 ])
 def test_archive_endpoints_degrade_without_postgres(client, url, key):
     r = client.get(url)
@@ -97,3 +99,25 @@ def test_dns_lookups_clamps_arguments(client, app_module, monkeypatch):
 def test_network_map_without_snapshot(client):
     r = client.get("/api/network-map")
     assert r.status_code == 200 and isinstance(r.get_json(), dict)
+
+
+def test_history_clamps_arguments(client, app_module, monkeypatch):
+    seen = {}
+
+    def fake(days, bucket, device=None, network=None):
+        seen.update(days=days, bucket=bucket, device=device, network=network)
+        return {"series": [{"period": "2026-11-09T00:00:00+00:00", "rx": 1, "tx": 2, "devices": 1}], "devices": []}
+
+    monkeypatch.setattr(app_module.db, "get_traffic_history", fake)
+    body = client.get("/api/traffic/history?days=999999&bucket=year&device=%20tv%20").get_json()
+    assert seen == {"days": 3650, "bucket": "day", "device": "tv", "network": None}
+    assert body["available"] is True and body["bucket"] == "day" and body["series"][0]["tx"] == 2
+
+
+def test_api_reports(client, app_module, monkeypatch, tmp_path):
+    monkeypatch.setattr(app_module, "log_dir", lambda: tmp_path)
+    (tmp_path / "reports").mkdir()
+    (tmp_path / "reports" / "week-2026-11-09.json").write_text(json.dumps({"period": "week", "start": "2026-11-09"}))
+    body = client.get("/api/reports?period=bogus&limit=999").get_json()
+    assert body == {"reports": [{"period": "week", "start": "2026-11-09"}]}
+    assert client.get("/api/reports?period=month").get_json() == {"reports": []}

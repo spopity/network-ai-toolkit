@@ -194,7 +194,9 @@ def prune_old(days: int | None = 90) -> dict | None:
     """Delete RETENTION_TABLES rows older than `days`. -> {table: rows deleted}, {} when
     retention is off (days 0/None), None when refused or Postgres failed. Best-effort:
     never raises (the daily run must not fail on it); one transaction, so a failure
-    deletes nothing."""
+    deletes nothing. TimescaleDB hypertables lose whole chunks instead (drop_chunks: a
+    row goes once its 7-day chunk is entirely older than the cutoff), never inside the
+    window the daily summaries still refresh from."""
     if not days:
         return {}
     if int(days) < MIN_RETENTION_DAYS:
@@ -204,7 +206,16 @@ def prune_old(days: int | None = 90) -> dict | None:
         ensure_schema()
         deleted = {}
         with _cursor() as cur:
+            hyper = _hypertables(cur)
             for table, column, extra in RETENTION_TABLES:
+                if table in hyper:
+                    keep = max(int(days), SUMMARY_REFRESH_DAYS + 1)
+                    cur.execute(f"SELECT count(*) AS n FROM {table}")
+                    before = cur.fetchone()["n"]
+                    cur.execute("SELECT drop_chunks(%s, older_than => now() - make_interval(days => %s))", (table, keep))
+                    cur.execute(f"SELECT count(*) AS n FROM {table}")
+                    deleted[table] = before - cur.fetchone()["n"]
+                    continue
                 cur.execute(
                     f"DELETE FROM {table} WHERE {column} < now() - make_interval(days => %s)"
                     + (f" AND {extra}" if extra else ""),
@@ -214,6 +225,105 @@ def prune_old(days: int | None = 90) -> dict | None:
         return deleted
     except Exception as e:
         logger.warning("Postgres prune_old failed (nothing deleted): %s", e)
+        return None
+
+
+# ------------------------------------------------------------------ TimescaleDB (optional)
+# Used when the `timescaledb` extension is installed in the database; on plain Postgres
+# everything above works unchanged and the *_history queries read the raw tables.
+#
+# - dns_lookups / traffic_usage become hypertables (7-day chunks), compressed once 14 days
+#   old: the Traffic Analyzer catch-up writes up to ~2 weeks back, and upserts into
+#   compressed chunks work but are slow.
+# - Daily per-DEVICE summaries (continuous aggregates) keep long-term history after the
+#   raw rows are pruned. Deliberately without domain or app names: the hidden list
+#   (`hidden.domains` / `hidden.apps`) purges raw rows, and summaries that outlive them
+#   must not carry those names. Summaries are kept forever (~50 rows a day each).
+HYPERTABLES = {  # table: (time column, compress segmentby, compress orderby)
+    "dns_lookups": ("hour", "device_key", "hour DESC, domain"),
+    "traffic_usage": ("hour", "mac", "hour DESC, app"),
+}
+CHUNK_INTERVAL = "7 days"
+COMPRESS_AFTER = "14 days"
+# The refresh policy re-aggregates the last SUMMARY_REFRESH_DAYS from the raw table, so raw
+# rows inside that window must never be dropped (prune_old keeps at least this much).
+SUMMARY_REFRESH_DAYS = 30
+SUMMARIES = {
+    "traffic_daily": """
+        SELECT time_bucket('1 day', hour) AS day, mac, sum(rx) AS rx, sum(tx) AS tx,
+               last(device, last_seen) AS device, last(network, last_seen) AS network
+        FROM traffic_usage GROUP BY 1, 2""",
+    "dns_daily": """
+        SELECT time_bucket('1 day', hour) AS day, device_key, sum(count) AS queries,
+               sum(CASE WHEN blocked THEN count ELSE 0 END) AS blocked,
+               last(device, last_seen) AS device, last(network, last_seen) AS network
+        FROM dns_lookups GROUP BY 1, 2""",
+}
+
+
+def _has_timescale(cur) -> bool:
+    cur.execute("SELECT 1 FROM pg_extension WHERE extname = 'timescaledb'")
+    return cur.fetchone() is not None
+
+
+def _hypertables(cur) -> set:
+    if not _has_timescale(cur):
+        return set()
+    cur.execute("SELECT hypertable_name FROM timescaledb_information.hypertables")
+    return {r["hypertable_name"] for r in cur.fetchall()}
+
+
+def _summaries(cur) -> set:
+    if not _has_timescale(cur):
+        return set()
+    cur.execute("SELECT view_name FROM timescaledb_information.continuous_aggregates")
+    return {r["view_name"] for r in cur.fetchall()}
+
+
+def ensure_timescale() -> list | None:
+    """Set up the hypertables, compression and daily summaries that are missing. Idempotent,
+    run by the daily job. -> the steps done ([] = nothing to do or no TimescaleDB), None
+    when Postgres failed. Never raises. Converting an existing table locks it while its
+    rows are moved into chunks (seconds at this size)."""
+    try:
+        ensure_schema()
+        conn = _connect()
+        conn.autocommit = True  # CALL refresh_continuous_aggregate refuses to run in a transaction
+        done = []
+        try:
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+            if not _has_timescale(cur):
+                return []
+            cur.execute("SELECT hypertable_name, compression_enabled FROM timescaledb_information.hypertables")
+            compressed = {r["hypertable_name"]: r["compression_enabled"] for r in cur.fetchall()}
+            for table, (column, segment_by, order_by) in HYPERTABLES.items():
+                if table not in compressed:
+                    cur.execute("SELECT create_hypertable(%s, by_range(%s, %s::interval), migrate_data => true)",
+                                (table, column, CHUNK_INTERVAL))
+                    done.append(f"{table}: hypertable")
+                if not compressed.get(table):
+                    cur.execute(f"ALTER TABLE {table} SET (timescaledb.compress, "
+                                "timescaledb.compress_segmentby = %s, timescaledb.compress_orderby = %s)",
+                                (segment_by, order_by))
+                    cur.execute("SELECT add_compression_policy(%s, %s::interval, if_not_exists => true)",
+                                (table, COMPRESS_AFTER))
+                    done.append(f"{table}: compression after {COMPRESS_AFTER}")
+            existing = _summaries(cur)
+            for view, sql in SUMMARIES.items():
+                if view in existing:
+                    continue
+                cur.execute(f"CREATE MATERIALIZED VIEW {view} WITH (timescaledb.continuous, "
+                            f"timescaledb.materialized_only = false) AS {sql} WITH NO DATA")
+                cur.execute("SELECT add_continuous_aggregate_policy(%s, start_offset => %s::interval, "
+                            "end_offset => interval '1 hour', schedule_interval => interval '1 hour', "
+                            "if_not_exists => true)", (view, f"{SUMMARY_REFRESH_DAYS} days"))
+                cur.execute("CALL refresh_continuous_aggregate(%s, NULL, NULL)", (view,))  # everything still raw
+                done.append(f"{view}: daily summary")
+        finally:
+            conn.close()
+        return done
+    except Exception as e:
+        logger.warning("Postgres ensure_timescale failed (continuing without it): %s", e)
         return None
 
 
@@ -502,3 +612,112 @@ def get_hourly_upload(days: int = 14) -> list:
             FROM traffic_usage WHERE hour > now() - make_interval(days => %s)
             GROUP BY mac, hour ORDER BY mac, hour""", (int(days),))
         return [dict(r) for r in cur.fetchall()]
+
+
+# ---- long-range history (daily summaries; raw tables when TimescaleDB is absent) ----
+
+_RAW_DAILY = {  # same columns as SUMMARIES, computed from the raw table
+    "traffic_daily": "(SELECT date_trunc('day', hour) AS day, mac, rx, tx, device, network FROM traffic_usage)",
+    "dns_daily": "(SELECT date_trunc('day', hour) AS day, device_key, count AS queries,"
+                 " CASE WHEN blocked THEN count ELSE 0 END AS blocked, device, network FROM dns_lookups)",
+}
+HISTORY_BUCKETS = ("day", "week", "month")
+
+
+def _daily_source(cur, view: str) -> str:
+    return view if view in _summaries(cur) else _RAW_DAILY[view]
+
+
+def _history(view: str, key: str, sums: tuple, rank: str, days: int, bucket: str, device, network, top: int,
+             start=None, end=None) -> dict:
+    """{series: [{period, <sums>}], devices: [{<key>, device, network, <sums>}]} over the last
+    `days` (whole days, UTC) or [start, end), one point per day/week/month; devices = the `top` by `rank`."""
+    if bucket not in HISTORY_BUCKETS:
+        raise ValueError(f"bucket must be one of {HISTORY_BUCKETS}")
+    ensure_schema()
+    totals = ", ".join(f"COALESCE(SUM(s.{c}), 0)::bigint AS {c}" for c in sums)
+    where = f"""s.day >= COALESCE(%(start)s::timestamptz, date_trunc('day', now() - make_interval(days => %(days)s)))
+        AND (%(end)s::timestamptz IS NULL OR s.day < %(end)s)
+        AND (%(device)s::text IS NULL OR s.{key} ILIKE %(device)s OR s.device ILIKE '%%' || %(device)s || '%%')
+        AND (%(network)s::text IS NULL OR s.network = %(network)s)"""
+    params = {"days": int(days), "device": device, "network": network, "top": int(top), "start": start, "end": end}
+    with _cursor() as cur:
+        src = _daily_source(cur, view)
+        cur.execute(f"""
+            SELECT date_trunc('{bucket}', s.day) AS period, {totals}, COUNT(DISTINCT s.{key}) AS devices
+            FROM {src} s WHERE {where} GROUP BY 1 ORDER BY 1""", params)
+        series = [_jsonable(dict(r)) for r in cur.fetchall()]
+        cur.execute(f"""
+            SELECT s.{key}, (ARRAY_AGG(s.device ORDER BY s.day DESC))[1] AS device,
+                   (ARRAY_AGG(s.network ORDER BY s.day DESC))[1] AS network, {totals}
+            FROM {src} s WHERE {where} GROUP BY s.{key}
+            ORDER BY {rank} DESC LIMIT %(top)s""", params)
+        devices = [_jsonable(dict(r)) for r in cur.fetchall()]
+    return {"series": series, "devices": devices}
+
+
+def get_traffic_history(days: int = 90, bucket: str = "day", device: str | None = None,
+                        network: str | None = None, top: int = 20, start=None, end=None) -> dict:
+    """Internet usage per day/week/month (rx = download, tx = upload) and the top devices."""
+    return _history("traffic_daily", "mac", ("rx", "tx"), "SUM(s.rx + s.tx)", days, bucket, device, network, top,
+                    start, end)
+
+
+def get_dns_history(days: int = 90, bucket: str = "day", device: str | None = None,
+                    network: str | None = None, top: int = 20, start=None, end=None) -> dict:
+    """DNS queries and blocked queries per day/week/month and the top devices."""
+    return _history("dns_daily", "device_key", ("queries", "blocked"), "SUM(s.queries)", days, bucket, device, network,
+                    top, start, end)
+
+
+# ---- weekly / monthly report (router_agent/report.py): one window [start, end) ----
+
+def get_check_stats(start, end) -> dict:
+    """From the 5-minute check rows: how many, WAN up share, clients, memory, router reboots
+    (uptime going backwards between consecutive checks)."""
+    ensure_schema()
+    with _cursor() as cur:
+        cur.execute("""
+            WITH c AS (SELECT collected_at, wan_up, client_count, mem_used_pct, uptime_seconds,
+                              lag(uptime_seconds) OVER (ORDER BY collected_at) AS prev_uptime
+                       FROM snapshots WHERE kind = 'check' AND collected_at >= %s AND collected_at < %s)
+            SELECT count(*) AS checks, count(*) FILTER (WHERE wan_up) AS wan_up_checks,
+                   round(avg(client_count), 1) AS clients_avg, max(client_count) AS clients_max,
+                   round(avg(mem_used_pct), 1) AS mem_used_pct_avg, max(mem_used_pct) AS mem_used_pct_max,
+                   count(*) FILTER (WHERE uptime_seconds < prev_uptime) AS reboots
+            FROM c""", (start, end))
+        return _jsonable(dict(cur.fetchone()))
+
+
+def get_line_stats(start, end) -> dict:
+    """spdMerlin speedtests that ran in the window (one per distinct test) and connmon's
+    24h ping/jitter averages as reported by the checks."""
+    ensure_schema()
+    with _cursor() as cur:
+        cur.execute("""
+            SELECT DISTINCT ON (st->>'last_at') st->>'last_at' AS at,
+                   (st->>'download_mbps')::float AS download_mbps, (st->>'upload_mbps')::float AS upload_mbps,
+                   (st->>'latency_ms')::float AS latency_ms
+            FROM (SELECT snapshot->'wan'->'speedtest' AS st FROM snapshots
+                  WHERE kind = 'check' AND collected_at >= %s AND collected_at < %s + interval '1 day') x
+            WHERE st->>'last_at' IS NOT NULL AND (st->>'last_at')::timestamptz >= %s
+              AND (st->>'last_at')::timestamptz < %s
+            ORDER BY st->>'last_at'""", (start, end, start, end))
+        tests = [dict(r) for r in cur.fetchall()]
+        cur.execute("""
+            SELECT round(avg((snapshot->'wan'->'connmon'->>'ping_ms_avg')::numeric), 2) AS ping_ms_avg,
+                   max((snapshot->'wan'->'connmon'->>'ping_ms_max')::numeric) AS ping_ms_max,
+                   round(avg((snapshot->'wan'->'connmon'->>'jitter_ms_avg')::numeric), 2) AS jitter_ms_avg,
+                   min((snapshot->'wan'->'connmon'->>'line_quality_min_pct')::numeric) AS line_quality_min_pct
+            FROM snapshots WHERE kind = 'check' AND collected_at >= %s AND collected_at < %s""", (start, end))
+        connmon = _jsonable(dict(cur.fetchone()))
+    return {"speedtests": tests, "connmon": connmon}
+
+
+def get_events_between(start, end) -> list:
+    """watchdog_events (watchdog + router events) in the window, oldest first: [{ts, event, detail}]."""
+    ensure_schema()
+    with _cursor() as cur:
+        cur.execute("SELECT ts, event, detail FROM watchdog_events WHERE ts >= %s AND ts < %s ORDER BY ts",
+                    (start, end))
+        return [_jsonable(dict(r)) for r in cur.fetchall()]
