@@ -10,7 +10,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from . import db
+from . import db, notify
 
 ROUTER_EVENTS_FILE = "router_events.log"
 
@@ -18,6 +18,7 @@ ROUTER_EVENTS_FILE = "router_events.log"
 def append_router_event(log_dir: Path, event: dict):
     with open(Path(log_dir) / ROUTER_EVENTS_FILE, "a") as f:
         f.write(json.dumps(event) + "\n")
+    notify.router_event(event)  # best-effort, never raises
     db.insert_watchdog_event(event)
 
 

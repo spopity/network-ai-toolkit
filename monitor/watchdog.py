@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from router_agent import db
+from router_agent import db, notify
 from router_agent.collector import SSHCollector
 
 logger = logging.getLogger(__name__)
@@ -83,10 +83,12 @@ def main():
     log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / Path(wd_cfg.get("log_file", "logs/watchdog.log")).name
     status_path = log_dir / "watchdog_status.json"
+    notifier = notify.configure(cfg, log_dir)  # Telegram, if notify: is configured (None otherwise)
 
     history = deque(maxlen=HISTORY_MAXLEN)
     first_failure_at = None
     last_restart_at = None
+    restarts_this_outage = 0
     currently_up = True
 
     print(f"watchdog started: targets={targets} interval={check_interval}s "
@@ -103,7 +105,13 @@ def main():
             if not currently_up:
                 downtime = time.time() - first_failure_at if first_failure_at else 0
                 append_log(log_path, {"ts": ts, "event": "recovered", "downtime_seconds": round(downtime, 1)})
+                if notifier:
+                    down_since = datetime.fromtimestamp(first_failure_at, tz=UTC).isoformat() if first_failure_at else None
+                    notifier.wan_recovered(down_since, downtime, restarts_this_outage, dry_run=args.dry_run)
+            elif notifier:
+                notifier.flush()  # no-op unless something is queued
             currently_up = True
+            restarts_this_outage = 0
             first_failure_at = None
         else:
             if currently_up:
@@ -128,6 +136,7 @@ def main():
                     except Exception as e:
                         append_log(log_path, {"ts": now_iso(), "event": "restart_result", "ok": False, "error": str(e)})
                 last_restart_at = time.time()
+                restarts_this_outage += 1
 
         write_status(status_path, {
             "up": currently_up,

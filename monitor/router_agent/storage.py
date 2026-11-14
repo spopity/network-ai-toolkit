@@ -25,6 +25,7 @@ class SnapshotStore:
         self.checks.mkdir(exist_ok=True)
         self.retention_days = retention_days
         self.check_retention_hours = check_retention_hours
+        self.first_seen_now: list[str] = []  # set by track_clients()
 
     def write(self, router_name: str, record: dict, kind: str = "daily") -> Path:
         ts = datetime.now(UTC).isoformat(timespec="seconds").replace(":", "-")
@@ -65,7 +66,10 @@ class SnapshotStore:
         except (OSError, ValueError):
             known, baseline = self._seed_known_clients(), True
 
+        self.first_seen_now = []  # MACs never seen before this call (for push notifications)
         for mac in (m.upper() for m in wifi_client_macs(wifi)):
+            if mac not in known and not baseline:
+                self.first_seen_now.append(mac)
             entry = known.setdefault(mac, {"first_seen": now.isoformat(timespec="seconds"), "baseline": baseline})
             entry["last_seen"] = now.isoformat(timespec="seconds")
         # remember each device's name/vendor so the AI briefing can name it even after it leaves

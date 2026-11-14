@@ -800,6 +800,8 @@ function describe(e: Ev): { label: string; sub?: string; tone: Tone; icon: typeo
           icon: ShieldAlert,
         };
       }
+      if (e.event === 'router_firmware_available')
+        return { label: `New firmware available: ${String(d.new)}`, sub: d.current ? `installed ${String(d.current)}` : undefined, tone: 'info', icon: RouterIcon };
       if (e.event.startsWith('router_wan_')) {
         const kind = e.event.slice('router_wan_'.length);
         const tone: Tone = kind === 'connected' ? 'ok' : kind === 'disconnected' || kind === 'stopped' ? 'high' : 'info';

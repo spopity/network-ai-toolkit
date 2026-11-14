@@ -25,7 +25,7 @@ load_dotenv()
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
-from router_agent import db
+from router_agent import db, notify
 from router_agent.collector import CONNMON_DB, SSHCollector
 from router_agent.devices import device_names, name_analysis
 from router_agent.events import append_router_event, read_router_events
@@ -136,17 +136,35 @@ def api_state():
 
 
 ROUTER_EVENT_FIELDS = ("unit", "state", "sbstate", "auxstate", "ip", "gateway", "router_uptime")
+FIRMWARE_EVENT_FIELDS = ("model", "current", "new")
 
 
 @app.route("/api/router-event", methods=["POST"])
 def api_router_event():
-    """Receives WAN state transitions from the router's Merlin wan-event hook.
+    """Receives events from the router's Merlin hooks: WAN state transitions
+    (wan-event) and new firmware releases (update-notification, "type": "firmware").
     Only the configured routers may post (LAN-only, no other auth)."""
-    router_hosts = {r.get("host") for r in load_config().get("routers", [])}
+    cfg = load_config()
+    router_hosts = {r.get("host") for r in cfg.get("routers", [])}
     if request.remote_addr not in router_hosts:
         return jsonify({"error": "forbidden"}), 403
 
     body = request.get_json(silent=True) or {}
+    notify.configure(cfg, log_dir())  # Telegram: dns/firmware events are pushed from append_router_event
+    if body.get("type") == "firmware":
+        event = {
+            "ts": datetime.now(UTC).isoformat(timespec="seconds"),
+            "event": "router_firmware_available",
+            "source": "router",
+            **{k: str(body[k])[:64] for k in FIRMWARE_EVENT_FIELDS if body.get(k)},
+        }
+        if not event.get("new"):
+            return jsonify({"error": "missing new"}), 400
+        if event["new"] == event.get("current"):  # already installed: nothing to report
+            return jsonify({"status": "ignored"}), 200
+        append_router_event(log_dir(), event)
+        return jsonify({"status": "ok"}), 201
+
     kind = re.sub(r"[^a-z_]", "", str(body.get("event", "")).lower())[:32]
     if not kind:
         return jsonify({"error": "missing event"}), 400

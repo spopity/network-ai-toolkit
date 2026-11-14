@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+from router_agent import notify
 from router_agent.claude_client import ClaudeClient
 from router_agent.collector import SSHCollector
 from router_agent.devices import device_names
@@ -63,6 +64,7 @@ def main():
     # "Check now" all share the rollup and its log cursor
     lock = open(store.base / ".run.lock", "w")  # noqa: SIM115 -- held for the whole run
     fcntl.flock(lock, fcntl.LOCK_EX)
+    notifier = notify.configure(cfg, store.base)  # Telegram, if notify: is configured (None otherwise)
 
     router_llm = None
     if args.mode == "daily":
@@ -102,6 +104,9 @@ def main():
         snapshot = build_snapshot(name, r["host"], grouped)
         snapshot["collector_ip"] = local_ip_towards(r["host"])
         snapshot["wifi"]["new_clients"] = store.track_clients(snapshot["wifi"])
+        if notifier and store.first_seen_now:
+            by_mac = {(c.get("mac") or "").upper(): c for c in snapshot["wifi"].get("clients", [])}
+            notifier.new_devices([by_mac.get(m) or {"mac": m} for m in store.first_seen_now])
         # network map: wired topology, DHCP/ARP hosts and the router's services (dashboard only, never sent to an LLM)
         snapshot["lan"] = lan_snapshot(grouped, snapshot)
         snapshot["services"] = parse_services(grouped)
@@ -136,6 +141,8 @@ def main():
             record = {"snapshot": snapshot, "analysis": analysis, "day_summary": day}
             path = store.write(name, record, kind="daily")
             rollup.reset()
+            if notifier:
+                notifier.daily(analysis)
             print(f"[{name}] wrote {path} (analysis source: {analysis.get('source')}, {day['checks']} checks rolled up)")
         else:
             # carry the last daily analysis forward so the dashboard and Tshoot keep showing it
@@ -147,6 +154,8 @@ def main():
             print(f"[{name}] wrote {path} (check, no LLM)")
         store.prune()
 
+    if notifier:
+        notifier.flush()  # anything queued while Telegram was unreachable
     sys.exit(exit_code)
 
 

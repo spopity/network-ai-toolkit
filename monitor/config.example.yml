@@ -64,6 +64,17 @@ dashboard:
 #   domains: [example.com]
 #   apps: [SomeApp]
 
+# Optional: push notifications to a Telegram bot (router_agent/notify.py). Create a bot
+# with @BotFather, put its token in .env as TELEGRAM_BOT_TOKEN, send the bot /start, then
+# `python -m router_agent.notify --chat-id` prints the chat_id and `--test` sends a test.
+# notify:
+#   telegram:
+#     chat_id: "123456789"
+#   events: [wan, dns, new_device, firmware]   # the default; add `daily` for the LLM briefing summary
+#   wan_min_downtime_seconds: 60                        # shorter outages are not pushed
+#   timezone: Europe/Berlin                             # times in messages (default: host's)
+#   dashboard_url: http://my-host.tailnet.ts.net:8080   # optional link under each message
+
 # Optional: the dashboard's network map (Map tab) places devices in rooms by their name
 # ("kitchen_Google-Home-Mini" -> Kitchen); phones/laptops go to Mobile, servers to Server,
 # washer/dryer/boiler to Utility, mesh nodes to the room most of their devices are in.

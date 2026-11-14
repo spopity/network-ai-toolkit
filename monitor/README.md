@@ -18,6 +18,7 @@ connection after a sustained outage.
 - `collect_and_analyze.py` — one-shot, two modes. `--mode check` (default; every 5 minutes via `network-ai-check.timer`, and the dashboard's "Check now" button): collect → summarize → track wifi clients → fold into the 24h rollup → store. **Never calls an LLM.** `--mode daily` (once a day via `network-ai-collect.timer`, 03:00 UTC — this machine's timezone is `Etc/UTC`; edit the timer's `OnCalendar=` if that's not your night): the same check, then the **only** LLM pass of the day, over the rollup, then a fresh rollup starts. Runs are serialized with `logs/.run.lock`; check records carry the last daily analysis forward in `latest.json`.
 - `router_agent/rollup.py` — day-long aggregation of the checks (`logs/rollup.json`). Each check keeps only the log lines newer than the previous check (timestamp cursor in `logs/.log_cursor.json`, so overlapping tails are never double-counted) and merges their syslog templates and firewall-drop counters, plus peaks/minimums (load, memory, temperatures, wifi clients, WAN-down checks, router reboots). The daily analysis renders it into the LLM's input (`day_summary` in the daily record).
 - Storage: daily records `logs/<router>-<ts>.json` (kept `retention_days`), checks gzipped in `logs/checks/` (kept `check_retention_hours`, ~9 KB each). Postgres gets every check too (`kind='check'`, raw log tails stripped); `/api/history` thins checks to ~hourly beyond 2 days. New wifi clients come from `logs/known_clients.json` (a client counts as new for 24 h after it first appears; devices unseen for `retention_days` are forgotten).
+- `router_agent/notify.py` — Telegram push notifications (see "Telegram notifications").
 - `watchdog.py` — continuous connectivity monitor; restarts WAN (`service restart_wan_if <unit>`) after `down_threshold_seconds` of outage, with a cooldown between attempts. Supports `--dry-run` and `--max-iterations` for safe testing.
 - `dashboard/app.py` — Flask backend: serves the built React app as static files, `/api/state` (live), `/api/history` (Postgres-backed trends), `/api/collect-now` + `/api/collect-status` (on-demand trigger).
 - `dashboard/app.py` also proxies `/api/tshoot/*` to the separate **Tshoot** troubleshooting agent (`/opt/tshoot`, `127.0.0.1:8090`); its chat UI is the dashboard's Tshoot tab (`dashboard/frontend/src/tshoot/`). See [`../tshoot/README.md`](../tshoot/README.md).
@@ -68,22 +69,22 @@ Requires Administration → System → "Enable JFFS custom scripts and configs".
 ssh admin@192.168.1.1 'cat > /jffs/scripts/wan-event && chmod 755 /jffs/scripts/wan-event' < router/wan-event
 ```
 
-### Firmware update emails (notify only)
+### Firmware update notifications (notify only)
 
 `router/update-notification` is installed as the Merlin hook
 `/jffs/scripts/update-notification`. The router's own scheduled firmware check
 (Administration → Firmware Upgrade → "Scheduled new firmware check", nvram
 `firmware_check_enable=1`) calls it when a newer Merlin release is out, and it
-**only sends an email** (once per version) -- nothing is downloaded or flashed.
-MerlinAU was deliberately not used: it has no notify-only mode and flashes on its
+**only reports it** -- nothing is downloaded or flashed. It POSTs
+`{"type": "firmware", ...}` to the dashboard's `/api/router-event`, which records a
+`router_firmware_available` event (Events card) and pushes it to Telegram. Each version
+is reported once; if the dashboard was unreachable it retries on the next scheduled
+check. MerlinAU was deliberately not used: it has no notify-only mode and flashes on its
 own after its postponement period (max 199 days).
-
-Mail goes through amtm's email settings (`amtm` → `em`); without them the hook
-only logs to syslog (`update-notification: new firmware ...`). Install/update and test:
 
 ```bash
 ssh admin@192.168.1.1 'cat > /jffs/scripts/update-notification && chmod 755 /jffs/scripts/update-notification' < router/update-notification
-ssh admin@192.168.1.1 /jffs/scripts/update-notification --test   # sends a test email
+ssh admin@192.168.1.1 /jffs/scripts/update-notification --test   # sends a TEST firmware notification
 ```
 
 ### Local NTP server (all networks)
@@ -171,6 +172,36 @@ NVRAM is a reference copy, not a one-shot restore: after a factory reset,
 reconfigure in the web UI and look values up with `gzip -dc $B/nvram.txt.gz | grep <key>`
 (blindly re-applying every `nvram set` can break a newer firmware).
 
+## Telegram notifications
+
+`router_agent/notify.py` pushes to a Telegram bot (one HTTPS POST per message, no SMTP):
+
+| `notify.events` | When | From |
+|---|---|---|
+| `wan` | internet back after an outage of at least `wan_min_downtime_seconds` (default 60), with the downtime and whether the watchdog restarted the WAN | `watchdog.py` |
+| `dns` | DNS health changes to unfiltered / down / ok again | `dnshealth.py` via `events.append_router_event` |
+| `new_device` | a wifi client seen for the first time (known_clients.json; devices forgotten after `retention_days` count as new again) | 5-minute check |
+| `firmware` | new Merlin release (`router/update-notification`) | `/api/router-event` |
+| `daily` | opt-in (not sent unless listed): the daily LLM briefing's one-line overall summary (or that it failed) | `--mode daily` |
+
+WAN down is not pushed while it happens -- Telegram is unreachable then; the
+"back up" message covers it. Router-reported `router_wan_*` events are not pushed (the
+watchdog's view is the one that matters). Sending is best-effort and never fails a
+check, the watchdog or an API call: messages that hit a network error or a Telegram
+5xx/429 are queued in `logs/.notify_queue.jsonl` and delivered (marked "delayed") by
+the next send, the watchdog's next loop or the next check; messages older than 2 days
+are dropped. A bad token/chat id is logged to the unit's journal and the message dropped.
+
+Setup:
+
+1. In Telegram, talk to @BotFather → `/newbot`; put the token in `.env` as `TELEGRAM_BOT_TOKEN=`.
+2. Open your new bot and send it `/start`.
+3. `.venv/bin/python3 -m router_agent.notify --chat-id` prints your chat id; add the
+   `notify:` block from `config.example.yml` to `config.yml` with it.
+4. `.venv/bin/python3 -m router_agent.notify --test` sends a test message.
+5. `sudo systemctl restart network-ai-watchdog.service network-ai-dashboard.service`
+   (the 5-minute check picks the config up on its own).
+
 ## DNS lookups (AdGuardHome)
 
 Every 5-minute check (`router_agent/dnslog.py`, enabled by the `adguard:` block in `config.yml`) reads the AdGuardHome query-log entries that are new since the last check (nanosecond cursor in `logs/.dns_cursor.json`) and names each client: IP -> MAC from the router's DHCP leases (all three dnsmasq instances) and ARP table, MAC -> name the same way as the Wi-Fi card (router UI name, networkmap, DHCP hostname); `adguard.aliases` overrides by IP. The lookups are archived in Postgres:
@@ -236,5 +267,4 @@ GitHub Actions (`.github/workflows/ci.yml` at the repo root) runs these plus the
 
 - **Router reboot test**: the `/jffs/scripts/services-start` key-persistence fix hasn't been validated against an actual reboot yet — rebooting the router is disruptive and wasn't done without explicit go-ahead.
 - **Live PPPoE restart test**: the watchdog's restart trigger logic was dry-run tested (`--dry-run`) against simulated downtime, but a real `service restart_wan_if 0` against the live router hasn't been fired yet — do that deliberately once, at a convenient time, before trusting the 5-minute auto-restart in production.
-- **Firmware update emails need amtm email set up** (noted 2026-11-11): the `update-notification` hook is installed, but amtm email isn't configured yet, so new-firmware alerts only go to syslog. To do: SSH to the router, run `amtm` → `em`, enter the SMTP details (Gmail: `smtp.gmail.com`, port 465, an app password), then send a test with `ssh admin@192.168.1.1 /jffs/scripts/update-notification --test`.
 - **AdGuardHome (installed 2026-11-12)**: release v0.107.80 via the jumpsmm7 installer (amtm `ag`), web UI http://192.168.1.1:3000 (login in `/root/.config/adguardhome.cred` on the backup host). AdGuardHome owns port 53; dnsmasq moved to 553 (local names/PTR forwarded there). Upstreams: Cloudflare + Quad9 DoH in parallel, bootstrap 9.9.9.9/1.1.1.1. Lists: AdGuard DNS filter + OISD Small. Installer set DHCP option 6 to the router on LAN/Guest/IoT (dnsmasq postconf hooks) and DNSFilter=Router; firmware exempts SDN bridges from DNSFilter, so `/jffs/scripts/nat-start` inserts REDIRECTs for br53/br54 (survives `service restart_firewall`, checked 2026-11-13; not yet validated across a reboot). Its query log is wired into network-ai and Tshoot (see "DNS lookups (AdGuardHome)").
