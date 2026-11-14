@@ -26,6 +26,7 @@ from .ssh import RouterShell
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+log = logging.getLogger(__name__)
 
 CONFIG_PATH = Path(os.getenv("TSHOOT_CONFIG", BASE_DIR / "config.yml"))
 CFG = yaml.safe_load(CONFIG_PATH.read_text())
@@ -61,7 +62,7 @@ def _sse(gen):
             for ev in gen:
                 yield f"data: {json.dumps(ev)}\n\n"
         except Exception as e:  # never leave the browser hanging without a final event
-            logging.exception("tshoot turn failed")
+            log.exception("tshoot turn failed")
             yield f"data: {json.dumps({'type': 'final', 'agent': 'error', 'content': f'Tshoot crashed: {e}'})}\n\n"
     return Response(stream_with_context(stream()), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})

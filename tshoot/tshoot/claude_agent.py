@@ -13,12 +13,21 @@ import logging
 import os
 import time
 import warnings
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Callable
 
-from claude_agent_sdk import (AssistantMessage, CanUseToolShadowedWarning, ClaudeAgentOptions, PermissionResultAllow,
-                              PermissionResultDeny, ResultMessage, create_sdk_mcp_server, query, tool)
+from claude_agent_sdk import (
+    AssistantMessage,
+    CanUseToolShadowedWarning,
+    ClaudeAgentOptions,
+    PermissionResultAllow,
+    PermissionResultDeny,
+    ResultMessage,
+    create_sdk_mcp_server,
+    query,
+    tool,
+)
 
 logger = logging.getLogger(__name__)
 warnings.simplefilter("ignore", CanUseToolShadowedWarning)  # allowed tools skip can_use_tool; that's intended

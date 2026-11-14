@@ -8,7 +8,7 @@ if not (Path(__file__).resolve().parent.parent / "config.yml").exists():
     pytest.skip("needs a config.yml to import the app", allow_module_level=True)
 
 os.environ.setdefault("GEMINI_API_KEY", "test-only")  # the app builds its LLM clients at import
-from tshoot import app as tapp  # noqa: E402
+from tshoot import app as tapp
 
 
 @pytest.fixture

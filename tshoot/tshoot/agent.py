@@ -16,9 +16,9 @@ import queue
 import threading
 import time
 import uuid
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterator, Optional
 
 import requests
 
@@ -53,7 +53,7 @@ class Pending:
 class Session:
     id: str
     contents: list = field(default_factory=list)
-    pending: Optional[Pending] = None
+    pending: Pending | None = None
     lock: threading.Lock = field(default_factory=threading.Lock)
     touched: float = field(default_factory=time.time)
 
@@ -63,7 +63,7 @@ class SessionStore:
         self._sessions: dict[str, Session] = {}
         self._lock = threading.Lock()
 
-    def get(self, session_id: str, seed_history: list = None) -> Session:
+    def get(self, session_id: str, seed_history: list | None = None) -> Session:
         with self._lock:
             now = time.time()
             for sid in [s for s, v in self._sessions.items() if now - v.touched > SESSION_TTL]:
@@ -81,7 +81,7 @@ class SessionStore:
             s.touched = now
             return s
 
-    def peek(self, session_id: str) -> Optional[Session]:
+    def peek(self, session_id: str) -> Session | None:
         with self._lock:
             return self._sessions.get(session_id)
 
@@ -104,7 +104,7 @@ def _fn_response(call: dict, payload: dict) -> dict:
     return {"functionResponse": resp}
 
 
-def _run_with_heartbeat(fn: Callable, label: str, every: float = 8.0, events: queue.Queue = None) -> Iterator:
+def _run_with_heartbeat(fn: Callable, label: str, every: float = 8.0, events: queue.Queue | None = None) -> Iterator:
     """Run ``fn`` in a thread, yielding status events while it works; the last item is ('result', value).
 
     ``fn`` may put ("event", dict) items on ``events`` to have them yielded as they happen.
@@ -142,7 +142,7 @@ class TshootAgent:
         self.cmd_timeout = int(cfg.get("limits", {}).get("command_timeout_seconds", 30))
         self.change_timeout = int(cfg.get("limits", {}).get("change_timeout_seconds", 90))
         router = cfg["router"]
-        fmt = dict(router_name=router.get("name", "router"), router_host=router["host"], cmd_timeout=self.cmd_timeout)
+        fmt = {"router_name": router.get("name", "router"), "router_host": router["host"], "cmd_timeout": self.cmd_timeout}
         self.system = SYSTEM_PROMPT.format(fix_step=FIX_STEP, policy_rule=POLICY_RULE, **fmt)
         self.system_claude = self.system + CLAUDE_APPROVAL_NOTE
         mon = cfg.get("monitor", {})
@@ -299,7 +299,7 @@ class TshootAgent:
                 yield {"type": "note", "content": text}
 
             responses: list = []
-            pending: Optional[Pending] = None
+            pending: Pending | None = None
             for call in calls:
                 if pending:
                     responses.append(_fn_response(call, {
@@ -436,7 +436,7 @@ class TshootAgent:
         responses[p.slot] = _fn_response(p.call, {"status": "rejected_by_user", "note": note})
         return responses
 
-    def _final(self, text: str, model: str = None, **extra) -> dict:
+    def _final(self, text: str, model: str | None = None, **extra) -> dict:
         model = model or (self.gemini.last_model_version or self.gemini.model).replace("models/", "")
         return {"type": "final", "agent": "tshoot", "model": model, "content": text, **extra}
 

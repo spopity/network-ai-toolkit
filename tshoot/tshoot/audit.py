@@ -9,7 +9,7 @@ import logging
 import os
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -40,16 +40,15 @@ class AuditLog:
         self._pg_down_until = 0.0
         self._lock = threading.Lock()
 
-    def record(self, event: str, session_id: str = None, command: str = None, kind: str = None,
-               decision: str = None, exit_code: int = None, duration_ms: int = None, **detail):
+    def record(self, event: str, session_id: str | None = None, command: str | None = None, kind: str | None = None,
+               decision: str | None = None, exit_code: int | None = None, duration_ms: int | None = None, **detail):
         row = {
-            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "ts": datetime.now(UTC).isoformat(timespec="seconds"),
             "session_id": session_id, "event": event, "command": command, "kind": kind,
             "decision": decision, "exit_code": exit_code, "duration_ms": duration_ms, "detail": detail,
         }
-        with self._lock:
-            with self.path.open("a") as f:
-                f.write(json.dumps(row) + "\n")
+        with self._lock, self.path.open("a") as f:
+            f.write(json.dumps(row) + "\n")
         if self.pg_enabled:
             threading.Thread(target=self._to_pg, args=(row,), daemon=True).start()
 
@@ -72,7 +71,7 @@ class AuditLog:
             import psycopg2
             import psycopg2.extras
             conn = psycopg2.connect(
-                host=os.environ["PGHOST"], port=int(os.getenv("PGPORT", 5432)),
+                host=os.environ["PGHOST"], port=int(os.getenv("PGPORT", "5432")),
                 dbname=os.environ["PGDATABASE"], user=os.environ["PGUSER"],
                 password=os.environ["PGPASSWORD"], connect_timeout=3,
             )

@@ -22,7 +22,9 @@ def test_quoted_wan_restart_is_high_risk():
 
 
 def test_prompt_teaches_the_quoted_form():
+    from pathlib import Path
+
     from tshoot import prompt
 
-    text = open(prompt.__file__).read()
+    text = Path(prompt.__file__).read_text()
     assert 'service \\"restart_wan_if 0\\"' in text or 'service "restart_wan_if 0"' in text

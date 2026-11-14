@@ -1,5 +1,4 @@
 """Persistent SSH shell to the router with hard per-command limits."""
-import socket
 import threading
 import time
 from dataclasses import dataclass
@@ -19,7 +18,7 @@ class CommandResult:
 
 
 class RouterShell:
-    def __init__(self, host: str, port: int = 22, username: str = None, key_filename: str = None,
+    def __init__(self, host: str, port: int = 22, username: str | None = None, key_filename: str | None = None,
                  connect_timeout: int = 10, max_output_bytes: int = 256_000):
         self.host = host
         self.port = port
@@ -56,7 +55,7 @@ class RouterShell:
                     self.close()
                     self._connect()
                 return self._exec(command, timeout, start)
-            except (paramiko.SSHException, socket.error, EOFError) as e:
+            except (OSError, paramiko.SSHException, EOFError) as e:
                 # one reconnect attempt for a stale connection
                 self.close()
                 try:

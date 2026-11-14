@@ -16,7 +16,6 @@ through to ``write`` so a human sees it before it runs.
 import re
 import shlex
 from dataclasses import dataclass, field
-from typing import List, Optional
 
 READ, WRITE, BLOCKED, REFUSED = "read", "write", "blocked", "refused"
 
@@ -25,7 +24,7 @@ READ, WRITE, BLOCKED, REFUSED = "read", "write", "blocked", "refused"
 class Verdict:
     kind: str
     reason: str = ""
-    warnings: List[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
     risk: str = "low"  # low | medium | high (only meaningful for write)
     opaque: bool = False  # write only because the syntax can't be verified (substitution, redirection...)
 
@@ -75,8 +74,8 @@ _WARNINGS = [
     (r"\b(iptables|ip6tables)\b.*\s-(F|X)\b", "high",
      "Flushes firewall rules -- the router may be exposed to the internet until the firewall restarts."),
     (r"/jffs/(scripts|configs)\b", "high",
-     "Changes a Merlin custom script/config under /jffs: it re-runs on every boot or service restart, so a "
-     "mistake persists. /jffs/scripts/services-start and wan-event belong to the network-ai monitor."),
+     ("Changes a Merlin custom script/config under /jffs: it re-runs on every boot or service restart, so a "
+      "mistake persists. /jffs/scripts/services-start and wan-event belong to the network-ai monitor.")),
     (r"\bnvram\s+set\s+jffs2_(scripts|enable)=", "high",
      "Toggles /jffs or custom-script support: disables the monitor's SSH-key persistence and wan-event hook."),
     (r"\bopkg\s+(install|remove|upgrade)\b", "medium",
@@ -105,7 +104,7 @@ def _read_if(cond: bool, why: str = "") -> Verdict:
     return Verdict(READ) if cond else Verdict(WRITE, why or "state-changing arguments")
 
 
-def _check_ip(args: List[str]) -> Verdict:
+def _check_ip(args: list[str]) -> Verdict:
     words = [a for a in args if not a.startswith("-")]
     if not words:
         return Verdict(READ)
@@ -123,7 +122,7 @@ def _check_ip(args: List[str]) -> Verdict:
 _IPT_READ_LONG = {"--list", "--list-rules", "--numeric", "--verbose", "--exact", "--line-numbers", "--table"}
 
 
-def _check_iptables(args: List[str]) -> Verdict:
+def _check_iptables(args: list[str]) -> Verdict:
     listing = False
     i = 0
     while i < len(args):
@@ -147,7 +146,7 @@ def _check_iptables(args: List[str]) -> Verdict:
 _NVRAM_READ = {"get", "show", "getall", "dump"}
 
 
-def _check_nvram(args: List[str]) -> Verdict:
+def _check_nvram(args: list[str]) -> Verdict:
     if not args:
         return Verdict(READ)
     return _read_if(args[0] in _NVRAM_READ, f"`nvram {args[0]}` changes NVRAM")
@@ -172,7 +171,7 @@ _WL_READ_NOARGS = {
 }
 
 
-def _check_wl(args: List[str]) -> Verdict:
+def _check_wl(args: list[str]) -> Verdict:
     rest = list(args)
     while rest and rest[0].startswith("-"):
         rest = rest[2:] if rest[0] in ("-i", "-a") else rest[1:]
@@ -188,20 +187,20 @@ def _check_wl(args: List[str]) -> Verdict:
     return Verdict(WRITE, f"`wl {sub}` with arguments changes radio settings")
 
 
-def _check_ping(args: List[str]) -> Verdict:
+def _check_ping(args: list[str]) -> Verdict:
     if "-c" not in args and not any(re.fullmatch(r"-c\d+", a) for a in args):
         return Verdict(REFUSED, "ping needs a count (e.g. `ping -c 4 1.1.1.1`) or it never exits")
     return Verdict(READ)
 
 
-def _check_top(args: List[str]) -> Verdict:
+def _check_top(args: list[str]) -> Verdict:
     flags = "".join(a[1:] for a in args if a.startswith("-"))
     if "b" not in flags or "n" not in flags:
         return Verdict(REFUSED, "top must run in batch mode with an iteration count, e.g. `top -b -n 1`")
     return Verdict(READ)
 
 
-def _check_tcpdump(args: List[str]) -> Verdict:
+def _check_tcpdump(args: list[str]) -> Verdict:
     if any(a == "-w" or a.startswith("-w") for a in args):
         return Verdict(WRITE, "tcpdump -w writes a capture file")
     if "-c" not in args and not any(re.fullmatch(r"-c\d+", a) for a in args):
@@ -209,17 +208,17 @@ def _check_tcpdump(args: List[str]) -> Verdict:
     return Verdict(READ)
 
 
-def _check_find(args: List[str]) -> Verdict:
+def _check_find(args: list[str]) -> Verdict:
     bad = {"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprintf", "-fls"}
     return _read_if(not (bad & set(args)), "find with -exec/-delete")
 
 
-def _check_awk(args: List[str]) -> Verdict:
+def _check_awk(args: list[str]) -> Verdict:
     prog = " ".join(a for a in args if not a.startswith("-"))
     return _read_if(not re.search(r"system\s*\(|\|\s*\"|>\s*\"|getline", prog), "awk program runs commands or writes files")
 
 
-def _check_sed(args: List[str]) -> Verdict:
+def _check_sed(args: list[str]) -> Verdict:
     if any(a.startswith("-i") or a == "--in-place" for a in args):
         return Verdict(WRITE, "sed -i edits files in place")
     for a in args:
@@ -231,33 +230,33 @@ def _check_sed(args: List[str]) -> Verdict:
     return Verdict(READ)
 
 
-def _check_arp(args: List[str]) -> Verdict:
+def _check_arp(args: list[str]) -> Verdict:
     return _read_if(all(a in ("-a", "-n", "-an", "-na", "-v") or not a.startswith("-") for a in args)
                     and not any(a in ("-d", "-s") for a in args), "arp table change")
 
 
-def _check_brctl(args: List[str]) -> Verdict:
+def _check_brctl(args: list[str]) -> Verdict:
     return _read_if(not args or args[0] in ("show", "showmacs", "showstp"), "bridge change")
 
 
-def _check_cru(args: List[str]) -> Verdict:
+def _check_cru(args: list[str]) -> Verdict:
     return _read_if(args[:1] == ["l"], "cron change")
 
 
-def _check_ifconfig(args: List[str]) -> Verdict:
+def _check_ifconfig(args: list[str]) -> Verdict:
     opts = [a for a in args if a != "-a"]
     return _read_if(len(opts) <= 1, "ifconfig with arguments changes an interface")
 
 
-def _check_route(args: List[str]) -> Verdict:
+def _check_route(args: list[str]) -> Verdict:
     return _read_if(all(a in ("-n", "-e", "-ee", "-A", "inet", "inet6") for a in args), "routing table change")
 
 
-def _check_mount(args: List[str]) -> Verdict:
+def _check_mount(args: list[str]) -> Verdict:
     return _read_if(not args, "mount with arguments")
 
 
-def _check_sleep(args: List[str]) -> Verdict:
+def _check_sleep(args: list[str]) -> Verdict:
     try:
         ok = len(args) == 1 and float(args[0]) <= 10
     except ValueError:
@@ -265,19 +264,19 @@ def _check_sleep(args: List[str]) -> Verdict:
     return Verdict(READ) if ok else Verdict(REFUSED, "sleep is limited to 10 seconds")
 
 
-def _check_fc(args: List[str]) -> Verdict:
+def _check_fc(args: list[str]) -> Verdict:
     return _read_if(args[:1] == ["status"], "flow cache change")
 
 
-def _check_ethctl(args: List[str]) -> Verdict:
+def _check_ethctl(args: list[str]) -> Verdict:
     return _read_if(len(args) == 2 and args[1] in ("media-type", "phy-power"), "ethernet PHY change")
 
 
-def _check_arping(args: List[str]) -> Verdict:
+def _check_arping(args: list[str]) -> Verdict:
     return _check_ping(args)
 
 
-def _check_conntrack(args: List[str]) -> Verdict:
+def _check_conntrack(args: list[str]) -> Verdict:
     if any(a in ("-E", "--event") for a in args):
         return Verdict(REFUSED, "`conntrack -E` never exits; use `conntrack -L` or `conntrack -S`")
     flags = [a for a in args if a.startswith("-")]
@@ -286,16 +285,16 @@ def _check_conntrack(args: List[str]) -> Verdict:
     return _read_if(ok, "conntrack with -D/-F/-U changes connection tracking")
 
 
-def _check_ipset(args: List[str]) -> Verdict:
+def _check_ipset(args: list[str]) -> Verdict:
     return _read_if(bool(args) and args[0] in ("list", "-L", "save", "-S", "test", "-T", "-n", "-t", "version"),
                     "ipset change")
 
 
-def _check_wg(args: List[str]) -> Verdict:
+def _check_wg(args: list[str]) -> Verdict:
     return _read_if(not args or args[0] in ("show", "showconf"), "WireGuard change")
 
 
-def _check_sqlite3(args: List[str]) -> Verdict:
+def _check_sqlite3(args: list[str]) -> Verdict:
     # read-only: a single SELECT (or .tables/.schema) passed on the command line
     sql, i = [], 0
     while i < len(args):
@@ -319,7 +318,7 @@ def _check_sqlite3(args: List[str]) -> Verdict:
     return _read_if(ok, "sqlite3 statement that isn't a plain SELECT")
 
 
-def _check_opkg(args: List[str]) -> Verdict:
+def _check_opkg(args: list[str]) -> Verdict:
     words = [a for a in args if not a.startswith("-")]
     return _read_if(bool(words) and words[0] in (
         "list", "list-installed", "list-upgradable", "info", "status", "files", "search", "find",
@@ -374,7 +373,7 @@ _SEPARATORS = {"|", "||", "&&", ";", "\n"}
 _SAFE_REDIRECTS = re.compile(r"\s*(\d?>>?\s*/dev/null|\d?>&\d|<\s*/dev/null)")
 
 
-def _split_segments(command: str) -> Optional[List[List[str]]]:
+def _split_segments(command: str) -> list[list[str]] | None:
     """Split a shell command into pipeline/list segments of argv tokens.
 
     Returns None if it can't be parsed confidently (caller treats as write).
@@ -400,7 +399,7 @@ def _split_segments(command: str) -> Optional[List[List[str]]]:
     return [s for s in segments if s]
 
 
-def _segment_verdict(argv: List[str]) -> Verdict:
+def _segment_verdict(argv: list[str]) -> Verdict:
     # leading VAR=value assignments
     while argv and re.fullmatch(r"[A-Za-z_]\w*=.*", argv[0]):
         argv = argv[1:]
