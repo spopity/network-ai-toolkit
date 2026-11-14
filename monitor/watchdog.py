@@ -50,6 +50,18 @@ def write_status(status_path: Path, state: dict, history: deque):
     status_path.write_text(json.dumps(payload, indent=2))
 
 
+def restart_command(wan_unit: int) -> str:
+    # Merlin's `service` takes the action and its argument as ONE argument: unquoted,
+    # `service restart_wan_if 0` only prints "Usage: service <action_service>" and does nothing.
+    return f'service "restart_wan_if {int(wan_unit)}"'
+
+
+def restart_succeeded(result: dict) -> bool:
+    """The router accepted the restart: it answers "Done." and nothing on stderr."""
+    out, err = (result.get("out") or "").strip(), (result.get("err") or "").strip()
+    return not err and "usage" not in out.lower() and "Done" in out
+
+
 def restart_wan(router_cfg: dict, wan_unit: int):
     collector = SSHCollector(
         host=router_cfg["host"],
@@ -58,7 +70,10 @@ def restart_wan(router_cfg: dict, wan_unit: int):
         password=router_cfg.get("password"),
         key_filename=router_cfg.get("key_filename"),
     )
-    return collector.run_command(f"service restart_wan_if {wan_unit}")
+    try:
+        return collector.run_command(restart_command(wan_unit))
+    finally:
+        collector.close()
 
 
 def main():
@@ -134,7 +149,8 @@ def main():
                 else:
                     try:
                         result = restart_wan(router_cfg, wan_unit)
-                        append_log(log_path, {"ts": now_iso(), "event": "restart_result", "ok": True, "detail": result})
+                        append_log(log_path, {"ts": now_iso(), "event": "restart_result",
+                                              "ok": restart_succeeded(result), "detail": result})
                     except Exception as e:
                         append_log(log_path, {"ts": now_iso(), "event": "restart_result", "ok": False, "error": str(e)})
                 last_restart_at = time.time()
