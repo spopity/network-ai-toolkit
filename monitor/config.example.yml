@@ -105,6 +105,7 @@ dashboard:
 #   backup_max_age_hours: 26
 #   disk_min_free_pct: 10
 #   traffic_max_age_hours: 3     # Traffic Analyzer stopped writing
+#   cert_min_days: 20            # router web UI certificate (Let's Encrypt) expires sooner than this
 #   heartbeat_url: https://hc-ping.com/<uuid>   # external dead-man's switch, pinged while checks are fresh
 
 # Remote access (router_agent/vpn.py), on by default; `vpn: false` turns it off. WireGuard

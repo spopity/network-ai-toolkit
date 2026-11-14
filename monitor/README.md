@@ -304,6 +304,7 @@ every 5 minutes; the 5-minute check watches the watchdog, so each guards the oth
 | watchdog | `logs/watchdog_status.json` older than 5 min (checked by the 5-minute check) | — |
 | traffic | no new Traffic Analyzer rows for 3 h (when `traffic_analyzer:` is on) | — |
 | iot_lan | the router's IoT → LAN LOG rule is missing (when `iot_lan:` is on; see "IoT devices reaching for the LAN") | — |
+| cert | the certificate the router's web UI serves (`/etc/cert.pem`, Let's Encrypt for the DDNS name) expires in under `cert_min_days` (20) days; says whether Let's Encrypt renewal is switched off (`le_enable`) or failing | — |
 | router_setup | something the router's hook scripts/add-ons set up, and that was there before, is missing (see "Router setup drift") | 15 min |
 
 A problem that outlasts its grace records one `monitor_problem` event (Events card,

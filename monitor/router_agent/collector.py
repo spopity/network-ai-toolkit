@@ -84,6 +84,9 @@ SERVICES_CMD = (
     'enable_samba dms_enable qos_enable qos_type ddns_enable_x ddns_hostname_x; do echo "nv_$k=$(nvram get $k)"; done; '
     "for i in 1 2 3 4 5 6 7 8 9 10; do n=$(nvram get wgs1_c${i}_name); "
     '[ -n "$n" ] && echo "wgpeer=$i|$n|$(nvram get wgs1_c${i}_addr)|$(nvram get wgs1_c${i}_enable)|$(nvram get wgs1_c${i}_pub)"; done; '
+    # the certificate the router's web server serves (Let's Encrypt or self-signed): expiry, names
+    "openssl x509 -noout -enddate -subject -issuer -in /etc/cert.pem 2>/dev/null"
+    " | sed -e 's/^notAfter=/cert_end=/' -e 's/^subject=/cert_subject=/' -e 's/^issuer=/cert_issuer=/'; "
     "wg show wgs1 dump 2>/dev/null | tail -n +2 | awk '{print \"wgdump=\"$4\"|\"$5\"|\"$3\"|\"$6\"|\"$7\"|\"$1}'"
 )
 

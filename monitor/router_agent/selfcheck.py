@@ -13,6 +13,9 @@ The watchdog (always running) calls run() every few minutes for:
              `traffic_analyzer:` is on: the router stopped writing its statistics
   iot_lan    the router's IoT -> LAN LOG rule is gone while `iot_lan:` is on
              (router_agent/iotlan.py; reinstalled by router/firewall-start)
+  cert       the certificate the router's web UI serves (/etc/cert.pem, usually Let's
+             Encrypt for the DDNS name) expires in under `cert_min_days` (20): renewal
+             (every 60 days, cron `LetsEncrypt`) has failed or is switched off
   router_setup  something the router's hook scripts / add-ons set up and that was there
              before is missing: a rule, redirect, cron job, process or script
              (router_agent/routersetup.py; 15 min grace for reboots)
@@ -44,7 +47,7 @@ STATE_FILE = ".selfcheck.json"
 TITLES = {
     "checks": "5-minute checks", "daily": "daily analysis", "backup": "router backup",
     "postgres": "Postgres archive", "dashboard": "dashboard", "disk": "disk space", "watchdog": "watchdog",
-    "traffic": "Traffic Analyzer data", "iot_lan": "IoT → LAN logging", "router_setup": "router setup",
+    "traffic": "Traffic Analyzer data", "iot_lan": "IoT → LAN logging", "router_setup": "router setup", "cert": "router certificate",
 }
 # alert only once a problem persisted this long (a restart or reboot would otherwise alert on stale
 # files that the next run refreshes); unlisted checks alert at once
@@ -174,6 +177,28 @@ def check_router_setup(log_dir: Path) -> str | None:
     return None
 
 
+def check_cert(log_dir: Path, now: datetime, min_days: float) -> str | None:
+    snap = (_read(log_dir / "latest.json") or {}).get("snapshot") or {}
+    services = snap.get("services") or {}
+    cert = services.get("cert") or {}
+    end = _parse_ts(cert.get("not_after"))
+    if end is None:
+        return None  # no certificate read (older check, or openssl missing)
+    left = end - now
+    if left >= timedelta(days=min_days):
+        return None
+    what = f"{cert.get('subject') or 'router'} ({cert.get('issuer') or 'unknown issuer'})"
+    days = abs(left.total_seconds()) / 86400
+    span = f"{days:.0f} days" if days >= 2 else f"{days * 24:.0f} h"
+    when = f"expired {span} ago" if left <= timedelta(0) else f"expires in {span}"
+    renew = ""
+    if cert.get("lets_encrypt"):
+        le = (services.get("nvram") or {}).get("le_enable")
+        renew = (" Let's Encrypt renewal is switched off (le_enable=" + str(le) + ")." if le not in (None, "1")
+                 else " Let's Encrypt renewal is on but has not succeeded: check port 80 reachability and DDNS.")
+    return f"certificate {what} {when} ({end:%Y-%m-%d}).{renew}"
+
+
 def check_watchdog(log_dir: Path, now: datetime) -> str | None:
     t = _parse_ts((_read(log_dir / "watchdog_status.json") or {}).get("checked_at"))
     if t is None or now - t > WATCHDOG_MAX_AGE:
@@ -197,6 +222,7 @@ def gather(cfg: dict, log_dir: Path, now: datetime, only=None, skip=()) -> dict[
         "traffic": lambda: check_traffic(log_dir, now, timedelta(hours=m.get("traffic_max_age_hours", 3)))
         if (cfg or {}).get("traffic_analyzer") else None,
         "iot_lan": lambda: check_iot_lan(log_dir) if (cfg or {}).get("iot_lan") is not None else None,
+        "cert": lambda: check_cert(log_dir, now, m.get("cert_min_days", 20)),
         "router_setup": lambda: check_router_setup(log_dir) if (cfg or {}).get("router_setup", {}) is not False else None,
     }
     out = {}

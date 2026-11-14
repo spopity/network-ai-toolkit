@@ -94,6 +94,31 @@ def lan_snapshot(grouped: dict[str, list[dict]], snapshot: dict) -> dict:
     return {"wired": wired_devices, "backhaul": backhaul, "hosts": sorted(hosts.values(), key=lambda h: h["ip"])}
 
 
+def _cn(dn: str) -> str:
+    """'C=US, O=Let's Encrypt, CN=YE1' -> 'YE1' (whole string when there is no CN)."""
+    for part in dn.split(","):
+        k, _, v = part.strip().partition("=")
+        if k.strip() == "CN":
+            return v.strip()
+    return dn.strip()
+
+
+def parse_cert(raw: dict) -> dict:
+    """openssl's notAfter/subject/issuer -> {"not_after": ISO UTC, "subject": CN, "issuer": "Let's Encrypt YE1", ...}."""
+    from datetime import UTC, datetime
+
+    out = {"subject": _cn(raw.get("subject", "")), "issuer": raw.get("issuer", "")}
+    org = next((p.split("=", 1)[1].strip() for p in out["issuer"].split(",") if p.strip().startswith("O=")), "")
+    out["issuer"] = " ".join(x for x in (org, _cn(out["issuer"])) if x) or out["issuer"]
+    out["lets_encrypt"] = "Let's Encrypt" in out["issuer"]
+    try:  # "Feb 12 17:46:50 2027 GMT" (day space-padded)
+        t = datetime.strptime(" ".join(raw.get("end", "").split()), "%b %d %H:%M:%S %Y %Z").replace(tzinfo=UTC)
+        out["not_after"] = t.isoformat(timespec="seconds")
+    except ValueError:
+        out["not_after"] = None
+    return out
+
+
 def parse_services(grouped: dict[str, list[dict]]) -> dict:
     """SERVICES_CMD's key=value lines -> {"proc": {...}, "nvram": {...}, "cron": [...], "wireguard": [...], ...}."""
     raw = _out(grouped.get("services", []), SERVICES_CMD)
@@ -121,9 +146,13 @@ def parse_services(grouped: dict[str, list[dict]]) -> dict:
                 handshakes["pub:" + pub] = rec
             for a in allowed.split(","):
                 handshakes.setdefault(a.split("/")[0], rec)
+        elif key in ("cert_end", "cert_subject", "cert_issuer"):
+            out.setdefault("cert", {})[key[5:]] = val.strip()
         elif key in ("now", "dnsmasq", "ntp_main", "ntp_sdn", "skynet"):
             out[key] = int(val) if val.isdigit() else 0
     now = out.get("now") or 0
+    if out.get("cert"):
+        out["cert"] = parse_cert(out["cert"])
     for peer in out["wireguard"]:
         pub = peer.pop("_pub", "")  # join key only, not kept in the snapshot
         hs, endpoint, rx, tx = (handshakes.get("pub:" + pub) if pub else None) or handshakes.get(peer["addr"]) \

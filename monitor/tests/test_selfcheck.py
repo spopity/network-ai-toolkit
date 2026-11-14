@@ -146,7 +146,7 @@ def test_run_end_to_end_events_and_telegram(tmp_path, telegram):
 def test_run_skip_only_and_never_raises(tmp_path, monkeypatch):
     res = run({}, tmp_path, only=("watchdog",), now=NOW)
     assert set(res) == {"watchdog"}
-    res = run({"dashboard": {"host": "127.0.0.1", "port": 1}}, tmp_path, skip=("watchdog", "postgres", "daily", "backup", "traffic", "iot_lan", "router_setup"), now=NOW)
+    res = run({"dashboard": {"host": "127.0.0.1", "port": 1}}, tmp_path, skip=("watchdog", "postgres", "daily", "backup", "traffic", "iot_lan", "router_setup", "cert"), now=NOW)
     assert set(res) == {"checks", "dashboard", "disk"}
     assert "not answering" in res["dashboard"]
 
@@ -174,3 +174,40 @@ def test_monitor_alerts_can_be_switched_off(tmp_path, monkeypatch):
     monkeypatch.setattr(n, "send", sent.append)
     n.router_event({"event": "monitor_problem", "check": "disk", "title": "disk space", "problem": "x", "since": NOW.isoformat()})
     assert sent == []
+
+
+# ---------------------------------------------------------------- router certificate
+
+def _cert_latest(log_dir, not_after, le_enable="1", issuer="Let's Encrypt YE1", lets_encrypt=True):
+    (log_dir / "latest.json").write_text(json.dumps({"snapshot": {"services": {
+        "nvram": {"le_enable": le_enable},
+        "cert": {"subject": "home.example.net", "issuer": issuer, "lets_encrypt": lets_encrypt,
+                 "not_after": not_after}}}}))
+
+
+def test_cert_ok_soon_expired_and_renewal_state(tmp_path):
+    from router_agent.selfcheck import check_cert
+
+    assert check_cert(tmp_path, NOW, 20) is None  # no latest.json
+    _cert_latest(tmp_path, (NOW + timedelta(days=60)).isoformat())
+    assert check_cert(tmp_path, NOW, 20) is None
+    _cert_latest(tmp_path, (NOW + timedelta(days=12)).isoformat())
+    msg = check_cert(tmp_path, NOW, 20)
+    assert "expires in 12 days" in msg and "renewal is on but has not succeeded" in msg
+    _cert_latest(tmp_path, (NOW + timedelta(days=12)).isoformat(), le_enable="0")
+    assert "renewal is switched off (le_enable=0)" in check_cert(tmp_path, NOW, 20)
+    _cert_latest(tmp_path, (NOW - timedelta(days=3)).isoformat(), issuer="ASUS self-signed", lets_encrypt=False)
+    msg = check_cert(tmp_path, NOW, 20)
+    assert "expired 3 days ago" in msg and "Let's Encrypt" not in msg
+    _cert_latest(tmp_path, None)
+    assert check_cert(tmp_path, NOW, 20) is None
+
+
+def test_parse_cert_from_openssl_output():
+    from router_agent.netmap import SERVICES_CMD, parse_services
+
+    raw = ("cert_end=Feb  2 17:46:50 2027 GMT\ncert_subject=CN=home.example.net\n"
+           "cert_issuer=C=US, O=Let's Encrypt, CN=YE1\n")
+    cert = parse_services({"services": [{"cmd": SERVICES_CMD, "out": raw}]})["cert"]
+    assert cert == {"subject": "home.example.net", "issuer": "Let's Encrypt YE1", "lets_encrypt": True,
+                    "not_after": "2027-02-02T17:46:50+00:00"}
