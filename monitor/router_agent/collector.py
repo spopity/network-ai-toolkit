@@ -68,7 +68,9 @@ ARP_CMD = "cat /proc/net/arp"
 LEASES_CMD = "cat /var/lib/misc/dnsmasq*.leases 2>/dev/null"
 # what runs on the router, for the network map's service legend: one "key=value" per line
 # (proc_* = process alive, nv_* = firmware setting, cron = amtm add-on jobs, wg = WireGuard
-# server peers as "wgpeer=<n>|<name>|<addr>" and "wgdump=<allowed-ips>|<last handshake epoch>")
+# server peers as "wgpeer=<n>|<name>|<addr>|<enabled>|<public key>" and
+# "wgdump=<allowed-ips>|<last handshake epoch>|<endpoint>|<rx bytes>|<tx bytes>|<public key>";
+# joined on the public key: the firmware's allowed-ips can differ from the peer's address)
 SERVICES_CMD = (
     "for p in AdGuardHome syslog-ng minidlna smbd avahi-daemon pppd dropbear httpds; do "
     'pidof $p >/dev/null && echo "proc_$p=1" || echo "proc_$p=0"; done; '
@@ -79,10 +81,10 @@ SERVICES_CMD = (
     'echo "skynet=$(iptables -t raw -S PREROUTING 2>/dev/null | grep -c Skynet)"; '
     "echo \"cron=$(cru l | sed -n 's/.*#\\(.*\\)#$/\\1/p' | tr '\\n' ',')\"; "
     "for k in wgs_enable ntpd_enable le_enable bwdpi_db_enable wrs_protect_enable wrs_mals_enable "
-    'enable_samba dms_enable qos_enable qos_type; do echo "nv_$k=$(nvram get $k)"; done; '
+    'enable_samba dms_enable qos_enable qos_type ddns_enable_x ddns_hostname_x; do echo "nv_$k=$(nvram get $k)"; done; '
     "for i in 1 2 3 4 5 6 7 8 9 10; do n=$(nvram get wgs1_c${i}_name); "
-    '[ -n "$n" ] && echo "wgpeer=$i|$n|$(nvram get wgs1_c${i}_addr)|$(nvram get wgs1_c${i}_enable)"; done; '
-    "wg show wgs1 dump 2>/dev/null | tail -n +2 | awk '{print \"wgdump=\"$4\"|\"$5}'"
+    '[ -n "$n" ] && echo "wgpeer=$i|$n|$(nvram get wgs1_c${i}_addr)|$(nvram get wgs1_c${i}_enable)|$(nvram get wgs1_c${i}_pub)"; done; '
+    "wg show wgs1 dump 2>/dev/null | tail -n +2 | awk '{print \"wgdump=\"$4\"|\"$5\"|\"$3\"|\"$6\"|\"$7\"|\"$1}'"
 )
 
 COMMAND_GROUPS: dict[str, list[str]] = {

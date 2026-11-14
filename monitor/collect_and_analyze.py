@@ -19,7 +19,17 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from router_agent import anomaly, db, iotlan, notify, routersetup, selfcheck, upnp
+from router_agent import (
+    anomaly,
+    db,
+    geoip,
+    iotlan,
+    notify,
+    routersetup,
+    selfcheck,
+    upnp,
+    vpn,
+)
 from router_agent.collector import CONNMON_POINTS_CMD, SSHCollector
 from router_agent.devices import device_names
 from router_agent.dnshealth import DnsHealth
@@ -86,6 +96,7 @@ def main():
     router_llm = None
     if args.mode == "daily":
         router_llm = build_router(cfg, warn=lambda m: print(m, file=sys.stderr))
+        geoip.update()  # offline IP -> country/ASN for VPN sessions (monthly DB-IP Lite; best-effort)
 
     exit_code = 0
     for r in cfg.get("routers", []):
@@ -113,6 +124,10 @@ def main():
         # network map: wired topology, DHCP/ARP hosts and the router's services (dashboard only, never sent to an LLM)
         snapshot["lan"] = lan_snapshot(grouped, snapshot)
         snapshot["services"] = parse_services(grouped)
+        if cfg.get("vpn", {}) is not False:
+            # WireGuard sessions (who connects from where) and DDNS == WAN IP -> events + Telegram (vpn, vpn_sessions)
+            snapshot["vpn"] = vpn.check_and_record(store.base, cfg.get("vpn"), snapshot["services"],
+                                                   snapshot["wan"].get("ip"))
         # ports LAN devices opened to the internet via UPnP; a device doing it for the first time -> event + Telegram
         adg = cfg.get("adguard") or {}
         namer = Namer(store.base, snapshot, grouped, adg.get("networks") or DEFAULT_NETWORKS)

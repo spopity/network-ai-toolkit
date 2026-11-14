@@ -16,6 +16,11 @@ What is sent (each can be switched off with `notify.events` in config.yml):
               above its own baseline (router_agent/anomaly.py; phones/computers skipped)
   upnp        a device opened a port to the internet via UPnP for the first time
               (router_agent/upnp.py; known devices re-opening ports stay quiet)
+  vpn         remote access: a WireGuard peer added on the router, a peer connecting from
+              a network (ISP/ASN) it never used, the DDNS name not matching the WAN IP
+              (router_agent/vpn.py)
+  vpn_sessions  every WireGuard session start (source IP, network, country) and end
+              (duration, traffic); opt-in
   daily       the daily LLM briefing's one-line overall summary (opt-in: not in the default list)
   report      the weekly / monthly network report: key numbers + AI summary (opt-in;
               router_agent/report.py)
@@ -51,8 +56,9 @@ LOCK_FILE = ".notify.lock"
 QUEUE_MAX = 50                       # oldest dropped beyond this
 QUEUE_MAX_AGE = timedelta(days=2)    # older undelivered messages are dropped, not sent
 TIMEOUT = 10
-ALL_EVENTS = ("wan", "dns", "new_device", "firmware", "upnp", "monitor", "anomaly", "iot_lan", "daily", "report")
-DEFAULT_EVENTS = ("wan", "dns", "new_device", "firmware", "upnp", "monitor", "anomaly", "iot_lan")  # major events only
+ALL_EVENTS = ("wan", "dns", "new_device", "firmware", "upnp", "monitor", "anomaly", "iot_lan", "vpn", "vpn_sessions",
+              "daily", "report")
+DEFAULT_EVENTS = ("wan", "dns", "new_device", "firmware", "upnp", "monitor", "anomaly", "iot_lan", "vpn")  # major only
 
 _notifier = None  # set by configure(); every hook is a no-op without it
 
@@ -249,6 +255,10 @@ class Notifier:
             lines.append("The firewall blocked it. Expected (e.g. a LAN MQTT broker)? Add it to "
                          "iot_lan.ignore_targets; otherwise check the device.")
             self.send("\n".join(lines) + self._footer())
+        elif ((kind == "vpn_new_peer" or kind == "ddns_mismatch" or kind == "ddns_ok") and "vpn" in self.events) \
+                or (kind == "vpn_connect" and event.get("new_network") and "vpn" in self.events) \
+                or ((kind == "vpn_connect" or kind == "vpn_disconnect") and "vpn_sessions" in self.events):
+            self._vpn_event(event, kind)
         elif kind == "upnp_new_device" and "upnp" in self.events:
             who = html.escape(event.get("device") or event.get("ip") or "?")
             where = ", ".join(html.escape(x) for x in (event.get("ip"), event.get("mac")) if x and x != event.get("device"))
@@ -257,6 +267,39 @@ class Notifier:
             lines.append("First time for this device (via UPnP). If unexpected, turn it off in the "
                          "device's settings or disable UPnP on the router.")
             self.send("\n".join(lines) + self._footer())
+
+    def _vpn_event(self, event: dict, kind: str) -> None:
+        from .geoip import describe
+
+        peer = html.escape(event.get("peer") or "?")
+        if kind == "vpn_new_peer":
+            self.send(f"🆕 <b>VPN peer added on the router: {peer}</b> ({html.escape(event.get('addr') or '?')})\n"
+                      "Not you? Remove it in VPN > VPN Server > WireGuard." + self._footer())
+        elif kind == "vpn_connect":
+            where = html.escape(describe(event)) or "unknown network"
+            src = html.escape(event.get("endpoint") or "?")
+            if event.get("new_network"):
+                verb = "moved to" if event.get("roamed") else "connected from"
+                self.send(f"⚠️ <b>VPN: {peer} {verb} a new network</b>\n{src} · {where}\n"
+                          "First time from this network. Not you? Remove the peer on the router and "
+                          "make new keys." + self._footer())
+            else:
+                self.send(f"🔐 <b>VPN: {peer} connected</b>\n{src} · {where}" + self._footer())
+        elif kind == "vpn_disconnect":
+            traffic = ", ".join(f"{mb(v)} {d}" for v, d in ((event.get("tx"), "to it"), (event.get("rx"), "from it"))
+                                if v is not None)
+            self.send(f"🔒 <b>VPN: {peer} disconnected</b> after {duration(event.get('duration_s') or 0)}"
+                      + (f"\n{traffic}" if traffic else "") + self._footer())
+        elif kind == "ddns_mismatch":
+            self.send(f"🌐 <b>DDNS out of date: {html.escape(event.get('host') or '?')}</b>\n"
+                      f"Resolves to {html.escape(', '.join(event.get('resolved') or []) or 'nothing')}, "
+                      f"WAN IP is {html.escape(event.get('wan_ip') or '?')}.\n"
+                      "VPN/remote access by name fails until the router updates it (WAN > DDNS, "
+                      "/jffs/scripts/ddns-start)." + self._footer())
+        elif kind == "ddns_ok":
+            self.send(f"🌐 <b>DDNS OK again: {html.escape(event.get('host') or '?')}</b> → "
+                      f"{html.escape(event.get('ip') or '?')}"
+                      + (f" (wrong since {self.hhmm(event['since'])})" if event.get("since") else "") + self._footer())
 
     def new_devices(self, clients: list[dict]) -> None:
         if "new_device" not in self.events or not clients:
@@ -296,6 +339,13 @@ class Notifier:
         else:
             lines += ["", f"(no AI summary: {html.escape((record.get('error') or 'no LLM answered')[:300])})"]
         self.send("\n".join(lines) + self._footer())
+
+
+def mb(n: float) -> str:
+    """Bytes -> '512 KB' / '45 MB' / '1.2 GB'."""
+    if n < 1e6:
+        return f"{n / 1e3:.0f} KB"
+    return f"{n / 1e6:.0f} MB" if n < 1e9 else f"{n / 1e9:.1f} GB"
 
 
 def duration(seconds: float) -> str:

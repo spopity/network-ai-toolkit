@@ -266,6 +266,8 @@ reconfigure in the web UI and look values up with `gzip -dc $B/nvram.txt.gz | gr
 | `upnp` | a device opens a port to the internet via UPnP **for the first time** (see "UPnP port mappings") | 5-minute check |
 | `report` | the weekly (Mondays) / monthly (1st) network report: key numbers + AI summary; opt-in (`router_agent/report.py`, `network-ai-report-{weekly,monthly}.timer`, Report card on Monitor, `/api/reports`) | report timer |
 | `iot_lan` | an IoT device tries to open a connection to a LAN device (blocked by the firewall; see "IoT devices reaching for the LAN") | 5-minute check |
+| `vpn` | remote access: a WireGuard peer added on the router, a peer connecting from a network (ISP) it never used, the DDNS name not matching the WAN IP (and OK again) (see "Remote access (WireGuard + DDNS)") | 5-minute check |
+| `vpn_sessions` | opt-in: every WireGuard session start (source IP, ISP, country) and end (duration, traffic) | 5-minute check |
 | `daily` | opt-in (not sent unless listed): the daily LLM briefing's one-line overall summary (or that it failed) | `--mode daily` |
 
 WAN down is not pushed while it happens -- Telegram is unreachable then; the
@@ -344,6 +346,37 @@ missing while the alert is open does not alert again (`/api/state` /
 Removed something on purpose: add it to `router_setup.ignore` (fnmatch patterns, e.g.
 `"cron:spdMerlin_*"`), or `rm logs/.router_setup.json` to re-learn from the next check.
 `router_setup: false` turns the feature off.
+
+## Remote access (WireGuard + DDNS)
+
+The router's WireGuard server is the one service reachable from the internet, through
+the DDNS name (DuckDNS via `/jffs/scripts/ddns-start`). Every 5-minute check reads the
+peers (`wg show wgs1 dump` in the `services` group: last handshake, endpoint, bytes) and
+`router_agent/vpn.py` turns that into sessions and events:
+
+| Event | When | Telegram |
+|---|---|---|
+| `vpn_new_peer` | a peer config appears on the router that wasn't there before | `vpn` |
+| `vpn_connect` | a session starts (handshake < 3 min old after none), with source IP, ISP/ASN and country | `vpn_sessions`; `vpn` too when `new_network` |
+| `vpn_connect` + `new_network` | the peer connects (or roams mid-session) from an ISP/ASN it never used before | `vpn` |
+| `vpn_disconnect` | no handshake for 10 min: duration and traffic of the session | `vpn_sessions` |
+| `ddns_mismatch` / `ddns_ok` | the DDNS name resolves to something other than the WAN IP on 2 checks in a row (resolved over DNS-over-HTTPS, Cloudflare then Google, so no cache hides it) / matches again | `vpn` |
+
+Sessions are seen at check granularity: a connect arrives up to 5 minutes late, a
+session shorter than one check may be missed. The first run is a silent baseline for
+peers (whatever is live is recorded); known networks per peer and open sessions live in
+`logs/.vpn_state.json`. `snapshot.vpn` has the per-peer state and the DDNS check;
+DDNS is skipped while the WAN has no public IP.
+
+Network and country come from the offline **DB-IP Lite** databases (IP Geolocation by
+[DB-IP](https://db-ip.com), CC BY 4.0) in `state/geoip/`, so peers' IPs never leave this
+host: the daily run downloads them when missing or older than 32 days;
+`.venv/bin/python3 -m router_agent.geoip --update` does it by hand and
+`... -m router_agent.geoip <ip>` looks one up. Without them sessions are still reported,
+just without network/country and without new-network detection.
+
+`vpn: false` turns it off; `vpn.ddns_host` checks another name than the router's
+`ddns_hostname_x`.
 
 ## Unusual device behaviour
 

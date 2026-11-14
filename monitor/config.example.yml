@@ -81,7 +81,7 @@ dashboard:
 # notify:
 #   telegram:
 #     chat_id: "123456789"
-#   events: [wan, dns, new_device, firmware, upnp, monitor, anomaly, iot_lan]   # the default; add `daily` (LLM briefing summary) and/or `report` (weekly/monthly report)
+#   events: [wan, dns, new_device, firmware, upnp, monitor, anomaly, iot_lan, vpn]   # the default; add `daily` (LLM briefing summary), `report` (weekly/monthly report), `vpn_sessions` (every WireGuard connect/disconnect)
 #   wan_min_downtime_seconds: 60                        # shorter outages are not pushed
 #   timezone: Europe/Berlin                             # times in messages (default: host's)
 #   dashboard_url: http://my-host.tailnet.ts.net:8080   # optional link under each message
@@ -106,6 +106,12 @@ dashboard:
 #   disk_min_free_pct: 10
 #   traffic_max_age_hours: 3     # Traffic Analyzer stopped writing
 #   heartbeat_url: https://hc-ping.com/<uuid>   # external dead-man's switch, pinged while checks are fresh
+
+# Remote access (router_agent/vpn.py), on by default; `vpn: false` turns it off. WireGuard
+# sessions and new peers/networks, DDNS name == WAN IP. Country/ISP from the offline DB-IP
+# Lite files in state/geoip/ (downloaded by the daily run).
+# vpn:
+#   ddns_host: myname.duckdns.org   # default: the router's ddns_hostname_x
 
 # Router setup drift (router_agent/routersetup.py), on by default; `router_setup: false` turns it off.
 # Every rule/redirect/cron job/process/script the check has seen on the router is remembered;

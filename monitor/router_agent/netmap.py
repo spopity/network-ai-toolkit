@@ -110,16 +110,25 @@ def parse_services(grouped: dict[str, list[dict]]) -> dict:
         elif key == "wgpeer":
             p = val.split("|")
             if len(p) >= 4:
-                out["wireguard"].append({"name": p[1], "addr": p[2].split("/")[0], "enabled": p[3] == "1"})
+                out["wireguard"].append({"name": p[1], "addr": p[2].split("/")[0], "enabled": p[3] == "1",
+                                         "_pub": p[4] if len(p) > 4 else ""})
         elif key == "wgdump":
-            allowed, _, hs = val.partition("|")
+            allowed, hs, endpoint, rx, tx, pub = (val.split("|") + [""] * 5)[:6]
+            ep = endpoint.rsplit(":", 1)[0].strip("[]") if endpoint not in ("", "(none)") else None
+            rec = (int(hs) if hs.isdigit() else 0, ep, int(rx) if rx.isdigit() else None,
+                   int(tx) if tx.isdigit() else None)
+            if pub:
+                handshakes["pub:" + pub] = rec
             for a in allowed.split(","):
-                handshakes[a.split("/")[0]] = int(hs) if hs.isdigit() else 0
+                handshakes.setdefault(a.split("/")[0], rec)
         elif key in ("now", "dnsmasq", "ntp_main", "ntp_sdn", "skynet"):
             out[key] = int(val) if val.isdigit() else 0
     now = out.get("now") or 0
     for peer in out["wireguard"]:
-        hs = handshakes.get(peer["addr"]) or 0
+        pub = peer.pop("_pub", "")  # join key only, not kept in the snapshot
+        hs, endpoint, rx, tx = (handshakes.get("pub:" + pub) if pub else None) or handshakes.get(peer["addr"]) \
+            or (0, None, None, None)
+        peer.update(handshake_ts=hs or None, endpoint=endpoint, rx=rx, tx=tx)
         peer["last_handshake_s"] = (now - hs) if hs and now else None
         peer["connected"] = bool(hs and now and now - hs < VPN_HANDSHAKE_FRESH_S)
     return out

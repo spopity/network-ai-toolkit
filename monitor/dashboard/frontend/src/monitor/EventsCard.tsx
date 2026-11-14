@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ArrowDownRight, CheckCircle2, History, Power, RefreshCw, Router as RouterIcon, ShieldAlert, ShieldCheck } from 'lucide-react';
+import { ArrowDownRight, CheckCircle2, Globe, History, KeyRound, Lock, LockOpen, Power, RefreshCw, Router as RouterIcon, ShieldAlert, ShieldCheck } from 'lucide-react';
 import type { DashboardState, HistoryResponse, WatchdogEvent } from '../types';
 import { Card, TONE, type Tone } from '../components/ui';
 import { dayClock, duration, relTime } from '../lib/format';
@@ -45,6 +45,21 @@ function describe(e: Ev): { label: string; sub?: string; tone: Tone; icon: typeo
         const ports = Array.isArray(d.ports) ? (d.ports as string[]) : [];
         return { label: `${String(d.device ?? d.ip)} opened a port to the internet`, sub: ports.join(', ') || undefined, tone: 'caution', icon: ShieldAlert };
       }
+      if (e.event === 'vpn_new_peer')
+        return { label: `VPN peer added: ${String(d.peer)}`, sub: d.addr ? String(d.addr) : undefined, tone: 'caution', icon: KeyRound };
+      if (e.event === 'vpn_connect') {
+        const where = [d.as_org, d.country].filter(Boolean).map(String).join(', ');
+        const sub = [d.endpoint, where].filter(Boolean).map(String).join(' · ') || undefined;
+        if (d.new_network)
+          return { label: `VPN: ${String(d.peer)} ${d.roamed ? 'moved to' : 'connected from'} a new network`, sub, tone: 'caution', icon: ShieldAlert };
+        return { label: `VPN: ${String(d.peer)} connected`, sub, tone: 'info', icon: LockOpen };
+      }
+      if (e.event === 'vpn_disconnect')
+        return { label: `VPN: ${String(d.peer)} disconnected`, sub: `after ${duration(Number(d.duration_s ?? 0))}`, tone: 'neutral', icon: Lock };
+      if (e.event === 'ddns_mismatch')
+        return { label: `DDNS out of date: ${String(d.host)}`, sub: `WAN IP ${String(d.wan_ip)}`, tone: 'high', icon: Globe };
+      if (e.event === 'ddns_ok')
+        return { label: `DDNS OK again: ${String(d.host)}`, sub: d.ip ? String(d.ip) : undefined, tone: 'ok', icon: Globe };
       if (e.event === 'router_firmware_available')
         return { label: `New firmware available: ${String(d.new)}`, sub: d.current ? `installed ${String(d.current)}` : undefined, tone: 'info', icon: RouterIcon };
       if (e.event.startsWith('router_wan_')) {

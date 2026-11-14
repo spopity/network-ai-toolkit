@@ -7,3 +7,4 @@ Flask>=3.0.0
 psycopg2-binary>=2.9.0
 claude-agent-sdk>=0.2.178
 waitress>=3.0.0
+maxminddb>=2.6.0
