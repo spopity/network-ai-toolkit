@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from router_agent import anomaly, db, iotlan, notify, selfcheck, upnp
+from router_agent import anomaly, db, iotlan, notify, routersetup, selfcheck, upnp
 from router_agent.collector import CONNMON_POINTS_CMD, SSHCollector
 from router_agent.devices import device_names
 from router_agent.dnshealth import DnsHealth
@@ -119,6 +119,10 @@ def main():
         names = {**namer.names, **{namer.ip_mac[ip]: a for ip, a in (adg.get("aliases") or {}).items() if ip in namer.ip_mac}}
         snapshot["upnp"] = upnp.check_and_record(store.base, _out(grouped.get("services", []), UPNP_CMD),
                                                  namer.ip_mac, names)
+        if cfg.get("router_setup", {}) is not False:
+            # hook-script setup (firewall rules, redirects, add-on jobs) still in place? missing -> self-check alert
+            snapshot["router_setup"] = routersetup.check(store.base, cfg.get("router_setup"),
+                                                         _out(grouped.get("services", []), routersetup.SETUP_CMD))
         if cfg.get("iot_lan") is not None:
             # IoT devices trying to open connections to the LAN (blocked + logged by the router) -> event + Telegram
             try:

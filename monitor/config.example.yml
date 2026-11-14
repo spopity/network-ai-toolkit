@@ -107,6 +107,13 @@ dashboard:
 #   traffic_max_age_hours: 3     # Traffic Analyzer stopped writing
 #   heartbeat_url: https://hc-ping.com/<uuid>   # external dead-man's switch, pinged while checks are fresh
 
+# Router setup drift (router_agent/routersetup.py), on by default; `router_setup: false` turns it off.
+# Every rule/redirect/cron job/process/script the check has seen on the router is remembered;
+# one that disappears later -> self-check `router_setup` -> Telegram (`monitor`).
+# Removed something on purpose? Ignore it (fnmatch patterns) or delete logs/.router_setup.json.
+# router_setup:
+#   ignore: ["cron:spdMerlin_*", "script:uiScribe"]
+
 # Optional: unusual appliance behaviour (router_agent/anomaly.py; these are the defaults).
 # Phones, tablets and computers and the Guest network are never checked.
 # anomaly:

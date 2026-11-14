@@ -146,7 +146,7 @@ def test_run_end_to_end_events_and_telegram(tmp_path, telegram):
 def test_run_skip_only_and_never_raises(tmp_path, monkeypatch):
     res = run({}, tmp_path, only=("watchdog",), now=NOW)
     assert set(res) == {"watchdog"}
-    res = run({"dashboard": {"host": "127.0.0.1", "port": 1}}, tmp_path, skip=("watchdog", "postgres", "daily", "backup", "traffic", "iot_lan"), now=NOW)
+    res = run({"dashboard": {"host": "127.0.0.1", "port": 1}}, tmp_path, skip=("watchdog", "postgres", "daily", "backup", "traffic", "iot_lan", "router_setup"), now=NOW)
     assert set(res) == {"checks", "dashboard", "disk"}
     assert "not answering" in res["dashboard"]
 

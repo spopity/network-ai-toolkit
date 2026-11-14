@@ -302,6 +302,7 @@ every 5 minutes; the 5-minute check watches the watchdog, so each guards the oth
 | watchdog | `logs/watchdog_status.json` older than 5 min (checked by the 5-minute check) | — |
 | traffic | no new Traffic Analyzer rows for 3 h (when `traffic_analyzer:` is on) | — |
 | iot_lan | the router's IoT → LAN LOG rule is missing (when `iot_lan:` is on; see "IoT devices reaching for the LAN") | — |
+| router_setup | something the router's hook scripts/add-ons set up, and that was there before, is missing (see "Router setup drift") | 15 min |
 
 A problem that outlasts its grace records one `monitor_problem` event (Events card,
 Postgres, Telegram `monitor`); when it clears, one `monitor_ok`. Short blips inside
@@ -313,6 +314,36 @@ crashing). For that, set `monitor.heartbeat_url` to an external dead-man's switc
 e.g. a free https://healthchecks.io check (period 5 min, grace 15 min, its own
 Telegram/email integration): the watchdog pings it every 5 minutes while the checks
 are fresh, and the service alerts when the pings stop. Not configured as of 2026-11-14.
+
+## Router setup drift
+
+A lot of the router's setup is rebuilt in memory by Merlin hook scripts and add-ons, and
+a hook that silently fails (reboot, firmware update, `service restart_firewall`, a USB
+stick that didn't mount) just makes things quieter. Every 5-minute check
+(`router_agent/routersetup.py`, read-only, part of the `services` command group) lists:
+
+| Item | Put there by |
+|---|---|
+| `skynet_ipsets`, `skynet_rules` (raw table) | `firewall-start` (Skynet) |
+| `sdn_accept:br0>br54` (LAN → IoT allowed) | `firewall-start` |
+| `dns_redirect:<bridge>` (Guest/IoT DNS → AdGuardHome), `ntp_redirect:<bridge>` | `nat-start` |
+| `ntp_sdn` (process), `root_ssh_keys` | `services-start` |
+| `entware`, `swap`, `syslog_ng` (scribe), most `cron:<tag>` jobs | `post-mount` / the add-ons on the USB stick |
+| `dhcp_ntp:<dnsmasq conf>` (DHCP option 42) | `dnsmasq*.postconf` |
+| `script:<name>` (every executable in `/jffs/scripts`, `*.bak*` skipped), `jffs_scripts` | `/jffs` + the custom-scripts setting |
+
+Nothing is configured per item: every item that has been OK once is remembered in
+`logs/.router_setup.json`, and one that later goes missing shows up in
+`snapshot.router_setup.missing`. Items the router never had are never reported, so the
+first run is a silent baseline. The self-check turns it into one `monitor_problem`
+(Telegram `monitor`, listing the missing items with the hook that creates them) after a
+15-minute grace, and one `monitor_ok` when everything is back. A further item going
+missing while the alert is open does not alert again (`/api/state` /
+`logs/latest.json` show the current list). Firmware-managed `cron:WGC_CHK_EP` is ignored.
+
+Removed something on purpose: add it to `router_setup.ignore` (fnmatch patterns, e.g.
+`"cron:spdMerlin_*"`), or `rm logs/.router_setup.json` to re-learn from the next check.
+`router_setup: false` turns the feature off.
 
 ## Unusual device behaviour
 

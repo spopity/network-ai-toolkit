@@ -2,6 +2,7 @@
 import paramiko
 
 from .iotlan import IOT_LAN_CMD
+from .routersetup import SETUP_CMD
 from .upnp import UPNP_CMD
 
 # Log layout. With scribe (syslog-ng on the USB stick) the main log is
@@ -133,6 +134,7 @@ COMMAND_GROUPS: dict[str, list[str]] = {
         SERVICES_CMD,
         UPNP_CMD,  # port mappings devices opened via UPnP / NAT-PMP (router_agent/upnp.py)
         IOT_LAN_CMD,  # blocked IoT -> LAN connection attempts (router_agent/iotlan.py)
+        SETUP_CMD,  # is what the hook scripts set up still in place? (router_agent/routersetup.py)
     ],
 }
 

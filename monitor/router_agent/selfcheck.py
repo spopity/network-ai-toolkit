@@ -13,6 +13,9 @@ The watchdog (always running) calls run() every few minutes for:
              `traffic_analyzer:` is on: the router stopped writing its statistics
   iot_lan    the router's IoT -> LAN LOG rule is gone while `iot_lan:` is on
              (router_agent/iotlan.py; reinstalled by router/firewall-start)
+  router_setup  something the router's hook scripts / add-ons set up and that was there
+             before is missing: a rule, redirect, cron job, process or script
+             (router_agent/routersetup.py; 15 min grace for reboots)
 
 and the 5-minute check calls run(only=("watchdog",)) to watch the watchdog in turn
 (its status file older than 5 minutes = it died or hangs), so each guards the other.
@@ -41,11 +44,12 @@ STATE_FILE = ".selfcheck.json"
 TITLES = {
     "checks": "5-minute checks", "daily": "daily analysis", "backup": "router backup",
     "postgres": "Postgres archive", "dashboard": "dashboard", "disk": "disk space", "watchdog": "watchdog",
-    "traffic": "Traffic Analyzer data", "iot_lan": "IoT → LAN logging",
+    "traffic": "Traffic Analyzer data", "iot_lan": "IoT → LAN logging", "router_setup": "router setup",
 }
 # alert only once a problem persisted this long (a restart or reboot would otherwise alert on stale
 # files that the next run refreshes); unlisted checks alert at once
-GRACE = {"checks": timedelta(minutes=10), "postgres": timedelta(minutes=15), "dashboard": timedelta(minutes=10)}
+GRACE = {"checks": timedelta(minutes=10), "postgres": timedelta(minutes=15), "dashboard": timedelta(minutes=10),
+         "router_setup": timedelta(minutes=15)}
 WATCHDOG_MAX_AGE = timedelta(minutes=5)
 
 
@@ -160,6 +164,16 @@ def check_iot_lan(log_dir: Path) -> str | None:
     return None
 
 
+def check_router_setup(log_dir: Path) -> str | None:
+    from .routersetup import describe_missing
+
+    snap = (_read(log_dir / "latest.json") or {}).get("snapshot") or {}
+    missing = (snap.get("router_setup") or {}).get("missing")
+    if missing:
+        return f"missing on the router: {describe_missing(missing)}"
+    return None
+
+
 def check_watchdog(log_dir: Path, now: datetime) -> str | None:
     t = _parse_ts((_read(log_dir / "watchdog_status.json") or {}).get("checked_at"))
     if t is None or now - t > WATCHDOG_MAX_AGE:
@@ -183,6 +197,7 @@ def gather(cfg: dict, log_dir: Path, now: datetime, only=None, skip=()) -> dict[
         "traffic": lambda: check_traffic(log_dir, now, timedelta(hours=m.get("traffic_max_age_hours", 3)))
         if (cfg or {}).get("traffic_analyzer") else None,
         "iot_lan": lambda: check_iot_lan(log_dir) if (cfg or {}).get("iot_lan") is not None else None,
+        "router_setup": lambda: check_router_setup(log_dir) if (cfg or {}).get("router_setup", {}) is not False else None,
     }
     out = {}
     for name, fn in checks.items():
