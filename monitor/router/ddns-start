@@ -1,0 +1,40 @@
+#!/bin/sh
+# Asuswrt-Merlin hook: /jffs/scripts/ddns-start <wan_ip>
+# Called by the firmware when WAN > DDNS is set to "Custom": on WAN up, on IP change
+# and on its periodic forced refresh. Updates a DuckDNS name and reports the result
+# back to the firmware (ddns_custom_updated 1|0 -> the web UI's DDNS status).
+#
+# The name comes from WAN > DDNS > Host Name (nvram ddns_hostname_x, e.g.
+# myname.duckdns.org); the token is kept out of this script, in a root-only file:
+#   /jffs/addons/duckdns.d/token   (one line; chmod 600)
+# so the script itself holds no secret.
+# Source of truth: /opt/network-ai/router/ddns-start (install: see README "Remote access").
+
+TAG="ddns-start"
+TOKEN_FILE=/jffs/addons/duckdns.d/token
+
+fail() {
+	logger -t "$TAG" "update failed: $1"
+	/sbin/ddns_custom_updated 0
+	exit 1
+}
+
+HOST=$(nvram get ddns_hostname_x)
+DOMAIN=${HOST%.duckdns.org}
+[ -n "$DOMAIN" ] && [ "$DOMAIN" != "$HOST" ] || fail "host name '$HOST' is not a duckdns.org name"
+TOKEN=$(head -n 1 "$TOKEN_FILE" 2>/dev/null | tr -d ' \r\n')
+[ -n "$TOKEN" ] || fail "no token in $TOKEN_FILE"
+
+# $1 = the WAN IP the firmware is publishing; empty -> DuckDNS uses the request's source IP
+IP="$1"
+case "$IP" in
+	*[!0-9.]*) IP="" ;;
+esac
+
+# verbose=true answers "OK|KO" on line 1, then the IP and UPDATED/NOCHANGE
+RESULT=$(curl -s -m 20 --retry 2 "https://www.duckdns.org/update?domains=${DOMAIN}&token=${TOKEN}&ip=${IP}&verbose=true")
+STATUS=$(echo "$RESULT" | sed -n 1p)
+[ "$STATUS" = "OK" ] || fail "DuckDNS answered '${STATUS:-nothing}' (curl exit/timeout or bad token/domain)"
+
+logger -t "$TAG" "$HOST -> $(echo "$RESULT" | sed -n 2p) ($(echo "$RESULT" | sed -n 4p))"
+/sbin/ddns_custom_updated 1

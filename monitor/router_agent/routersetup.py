@@ -3,7 +3,7 @@
 Much of this setup lives in memory and is rebuilt by Merlin hook scripts: Skynet's
 ipsets and iptables rules (firewall-start), the Guest/IoT DNS and NTP redirects
 (nat-start), the LAN -> IoT accept rule (firewall-start), ntp-sdn and root's SSH keys
-(services-start), Entware, swap, scribe's syslog-ng and the add-on cron jobs (post-mount
+(services-start), Entware, swap, scribe's syslog-ng (and that it still owns /dev/log) and the add-on cron jobs (post-mount
 on the USB stick), the DHCP NTP option (dnsmasq*.postconf). When a hook silently fails
 (after a reboot, a firmware update, `service restart_firewall`, a USB stick that did not
 mount) nothing breaks loudly: data just gets quieter, or a network loses filtering.
@@ -44,6 +44,14 @@ SETUP_CMD = "; ".join([
     'echo "skynet_rules=$(iptables -t raw -S 2>/dev/null | grep -c Skynet)"',
     'echo "ntp_sdn=$(kill -0 "$(cat /var/run/ntp-sdn.pid 2>/dev/null)" 2>/dev/null && echo 1 || echo 0)"',
     'echo "syslog_ng=$(pidof syslog-ng >/dev/null && echo 1 || echo 0)"',
+    # syslog-ng still owns /dev/log? If something recreates the socket later (a firmware
+    # service restart did, 2026-11-14), syslog-ng keeps reading the deleted one and all
+    # userspace logging is silently lost. OK = /dev/log no newer than syslog-ng + 60 s.
+    ('bt=$(awk \'/^btime/{print $2}\' /proc/stat); st=0; for p in $(pidof syslog-ng); do'
+     ' s=$(awk \'{print $22}\' /proc/$p/stat 2>/dev/null); [ "${s:-0}" -gt "$st" ] && st=$s; done;'
+     ' dl=$(date -r /dev/log +%s 2>/dev/null || echo 0);'
+     ' echo "syslog_socket=$([ "$st" -gt 0 ] && [ "$dl" -gt 0 ] && [ $((dl - bt - st / 100)) -le 60 ]'
+     ' && echo 1 || echo 0)"'),
     'echo "root_ssh_keys=$([ -s /home/root/.ssh/authorized_keys ] && echo 1 || echo 0)"',
     "iptables -t nat -S DNSFILTER 2>/dev/null | sed -n 's/^-A DNSFILTER -i \\([^ ]*\\) -j REDIRECT$/dns_redirect:\\1=1/p'",
     ("iptables -t nat -S PREROUTING 2>/dev/null"
@@ -62,7 +70,8 @@ HINTS = (
     ("sdn_accept:", "firewall-start"), ("skynet_", "firewall-start (Skynet)"),
     ("ntp_sdn", "services-start"), ("root_ssh_keys", "services-start"),
     ("entware", "post-mount (USB stick)"), ("swap", "post-mount (USB stick)"),
-    ("syslog_ng", "Entware (scribe)"), ("cron:", "the add-on's startup"),
+    ("syslog_ng", "Entware (scribe)"),
+    ("syslog_socket", "syslog-ng lost /dev/log, logs are dropped: /opt/etc/init.d/S01syslog-ng restart"), ("cron:", "the add-on's startup"),
     ("dhcp_ntp:", "dnsmasq*.postconf"), ("script:", "/jffs/scripts (restore from a backup)"),
     ("jffs_scripts", "Administration > System > custom scripts"),
 )

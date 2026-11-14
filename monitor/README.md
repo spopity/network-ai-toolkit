@@ -331,6 +331,7 @@ stick that didn't mount) just makes things quieter. Every 5-minute check
 | `dns_redirect:<bridge>` (Guest/IoT DNS → AdGuardHome), `ntp_redirect:<bridge>` | `nat-start` |
 | `ntp_sdn` (process), `root_ssh_keys` | `services-start` |
 | `entware`, `swap`, `syslog_ng` (scribe), most `cron:<tag>` jobs | `post-mount` / the add-ons on the USB stick |
+| `syslog_socket`: syslog-ng still owns `/dev/log` (a firmware service restart can recreate the socket; syslog-ng then silently drops all userspace logs until `/opt/etc/init.d/S01syslog-ng restart`) | scribe |
 | `dhcp_ntp:<dnsmasq conf>` (DHCP option 42) | `dnsmasq*.postconf` |
 | `script:<name>` (every executable in `/jffs/scripts`, `*.bak*` skipped), `jffs_scripts` | `/jffs` + the custom-scripts setting |
 
@@ -377,6 +378,17 @@ just without network/country and without new-network detection.
 
 `vpn: false` turns it off; `vpn.ddns_host` checks another name than the router's
 `ddns_hostname_x`.
+
+**DuckDNS updater** (`router/ddns-start`, Merlin hook for WAN > DDNS = Custom): updates
+the name set in WAN > DDNS > Host Name with the WAN IP the firmware passes in, verifies
+TLS, logs the result (`ddns-start` tag) and reports it back to the web UI. The token is
+not in the script but in a root-only file on the router. Install / test:
+
+```bash
+ssh admin@192.168.1.1 'mkdir -p /jffs/addons/duckdns.d && umask 077 && cat > /jffs/addons/duckdns.d/token'   # paste the token, Ctrl-D
+ssh admin@192.168.1.1 'cat > /jffs/scripts/ddns-start && chmod 755 /jffs/scripts/ddns-start' < router/ddns-start
+ssh admin@192.168.1.1 '/jffs/scripts/ddns-start "$(nvram get wan0_ipaddr)"; nvram get ddns_status'   # 1 = OK
+```
 
 ## Unusual device behaviour
 

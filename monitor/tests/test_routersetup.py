@@ -14,6 +14,7 @@ skynet_ipsets=12
 skynet_rules=8
 ntp_sdn=1
 syslog_ng=1
+syslog_socket=1
 root_ssh_keys=1
 dns_redirect:br54=1
 dns_redirect:br53=1
@@ -76,6 +77,14 @@ def test_ignore_patterns_and_firmware_default(tmp_path):
     assert SetupWatch(tmp_path).check(out, NOW)["missing"] == ["cron:Skynet_rules", "script:nat-start"]
     w = SetupWatch(tmp_path, {"ignore": ["cron:Skynet_*"]})
     assert w.check(out, NOW)["missing"] == ["script:nat-start"]
+
+
+def test_stale_syslog_socket_is_reported(tmp_path):
+    w = SetupWatch(tmp_path)
+    w.check(FULL, NOW)
+    res = w.check(FULL.replace("syslog_socket=1", "syslog_socket=0"), NOW)
+    assert res["missing"] == ["syslog_socket"]
+    assert "S01syslog-ng restart" in describe_missing(res["missing"])
 
 
 def test_describe_groups_by_hook():
