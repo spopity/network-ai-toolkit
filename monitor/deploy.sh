@@ -14,7 +14,7 @@
 #   2. pip install -r requirements.txt if it changed since the last deploy
 #   3. npm ci (lockfile changed) + npm run build if frontend sources are newer than dist/
 #      (Flask reads dist/ from disk: no restart needed for the frontend)
-#   4. restart network-ai-dashboard / network-ai-watchdog only if code, config.yml or
+#   4. restart network-ai-dashboard / network-ai-watchdog (/ network-ai-telegram if enabled) only if code, config.yml or
 #      .env is newer than the running process. Waits for logs/.run.lock first: a
 #      dashboard "Check now" runs in the dashboard's cgroup and would be killed. The
 #      5-minute check and the daily run start fresh processes and need no restart.
@@ -125,7 +125,10 @@ fi
 step "services"
 CODE_MTIME=$(newest "${PYFILES[@]}" config.yml .env)
 RESTARTED=()
-for svc in network-ai-dashboard network-ai-watchdog; do
+# the Telegram bot only where it is installed (optional: notify.telegram.interactive)
+SERVICES=(network-ai-dashboard network-ai-watchdog)
+systemctl is-enabled --quiet network-ai-telegram.service 2>/dev/null && SERVICES+=(network-ai-telegram)
+for svc in "${SERVICES[@]}"; do
     since=$(started "$svc.service")
     if [ "$since" -ne 0 ] && [ "$CODE_MTIME" -le "$since" ] && ! $DEPS_CHANGED; then
         ok "$svc runs the current code"
@@ -156,7 +159,7 @@ done
 # ---- 5. health ----
 step "health"
 if ! $DRY; then
-    for svc in network-ai-dashboard network-ai-watchdog; do
+    for svc in "${SERVICES[@]}"; do
         systemctl is-active --quiet "$svc.service" || {
             journalctl -u "$svc.service" -n 20 --no-pager; fail "$svc is not running"; }
     done

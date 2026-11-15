@@ -23,6 +23,11 @@ only links to network-ai are:
   Tailscale makes `127.0.0.1:8090` reachable from the tailnet. Each decision is audited
   with the approver (`decision` rows, `user` = login + device),
 - the chat UI lives in `network-ai/dashboard/frontend/src/tshoot/`.
+- network-ai's Telegram bot (`router_agent/telegram_bot.py`) is a second client of
+  `/api/tshoot/chat` and `/api/tshoot/approve`: it calls Tshoot directly with the proxy key,
+  sends `X-Tshoot-User: telegram:<user>` and is its own approver check (configured chat +
+  users; `high`-risk approvals need a PIN). Keep the SSE event shapes (`command`,
+  `approval` with `risk`/`warnings`/`reason`, `final`, `error`) compatible with it.
 
 ## Safety model
 

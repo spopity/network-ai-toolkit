@@ -44,6 +44,9 @@ SETUP_CMD = "; ".join([
     'echo "skynet_rules=$(iptables -t raw -S 2>/dev/null | grep -c Skynet)"',
     'echo "ntp_sdn=$(kill -0 "$(cat /var/run/ntp-sdn.pid 2>/dev/null)" 2>/dev/null && echo 1 || echo 0)"',
     'echo "syslog_ng=$(pidof syslog-ng >/dev/null && echo 1 || echo 0)"',
+    # firmware daemon that writes TrafficAnalyzer.db: it died in the service batch of a
+    # password change (chpass, 2026-11-14) and `service start_hour_monitor` did not bring it back
+    'echo "hour_monitor=$(pidof hour_monitor >/dev/null && echo 1 || echo 0)"',
     # syslog-ng still owns /dev/log? If something recreates the socket later (a firmware
     # service restart did, 2026-11-14), syslog-ng keeps reading the deleted one and all
     # userspace logging is silently lost. OK = /dev/log no newer than syslog-ng + 60 s.
@@ -52,7 +55,10 @@ SETUP_CMD = "; ".join([
      ' dl=$(date -r /dev/log +%s 2>/dev/null || echo 0);'
      ' echo "syslog_socket=$([ "$st" -gt 0 ] && [ "$dl" -gt 0 ] && [ $((dl - bt - st / 100)) -le 60 ]'
      ' && echo 1 || echo 0)"'),
-    'echo "root_ssh_keys=$([ -s /home/root/.ssh/authorized_keys ] && echo 1 || echo 0)"',
+    # every key services-start installs must be there: a password change (chpass) rewrites the
+    # file with only the GUI's keys, which locked Tshoot out on 2026-11-15
+    ('echo "root_ssh_keys=$([ -s /home/root/.ssh/authorized_keys ] && ! grep -vxFf /home/root/.ssh/authorized_keys'
+     ' /jffs/network-ai/authorized_keys 2>/dev/null | grep -q . && echo 1 || echo 0)"'),
     "iptables -t nat -S DNSFILTER 2>/dev/null | sed -n 's/^-A DNSFILTER -i \\([^ ]*\\) -j REDIRECT$/dns_redirect:\\1=1/p'",
     ("iptables -t nat -S PREROUTING 2>/dev/null"
      " | sed -n 's/^-A PREROUTING -i \\([^ ]*\\) -p udp -m udp --dport 123 -j REDIRECT.*/ntp_redirect:\\1=1/p'"),
@@ -71,6 +77,8 @@ HINTS = (
     ("ntp_sdn", "services-start"), ("root_ssh_keys", "services-start"),
     ("entware", "post-mount (USB stick)"), ("swap", "post-mount (USB stick)"),
     ("syslog_ng", "Entware (scribe)"),
+    ("hour_monitor", ("Traffic Analyzer stats are no longer saved: "
+                      "ssh router 'nohup /sbin/hour_monitor </dev/null >/dev/null 2>&1 &'")),
     ("syslog_socket", "syslog-ng lost /dev/log, logs are dropped: /opt/etc/init.d/S01syslog-ng restart"), ("cron:", "the add-on's startup"),
     ("dhcp_ntp:", "dnsmasq*.postconf"), ("script:", "/jffs/scripts (restore from a backup)"),
     ("jffs_scripts", "Administration > System > custom scripts"),

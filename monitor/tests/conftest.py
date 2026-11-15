@@ -1,4 +1,4 @@
-"""Shared fixtures. Tests never touch the router, AdGuardHome or Postgres.
+"""Shared fixtures. Tests never touch the router, AdGuardHome, Postgres or systemd.
 
 Test data uses documentation addresses (192.0.2.0/24, 203.0.113.0/24) and made-up
 MACs so the suite can be published with the public toolkit unchanged.
@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from router_agent import db
+from router_agent import db, remedy
 
 
 @pytest.fixture(autouse=True)
@@ -20,6 +20,18 @@ def no_postgres(monkeypatch):
 
     monkeypatch.setattr(db, "_connect", refuse)
     monkeypatch.setattr(db, "_SCHEMA_READY", False)
+
+
+@pytest.fixture(autouse=True)
+def no_real_fixes(monkeypatch):
+    """A fix never really runs (SSH to the router, systemctl on this production host):
+    the self-check calls remedy.auto_fix, so any test could otherwise restart a service."""
+
+    def refuse(*_a, **_k):
+        raise RuntimeError("running fixes is disabled in tests")
+
+    monkeypatch.setattr(remedy, "_run_router", refuse)
+    monkeypatch.setattr(remedy, "_run_host", refuse)
 
 
 def syslog_ts(minutes_ago: float = 0, now: datetime | None = None) -> str:

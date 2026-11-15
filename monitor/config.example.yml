@@ -81,10 +81,19 @@ dashboard:
 # notify:
 #   telegram:
 #     chat_id: "123456789"
+#     interactive: false            # true: alert buttons (Fix / Troubleshoot / Mute) + Tshoot chat via
+#                                   # network-ai-telegram.service (router_agent/telegram_bot.py)
+#     allowed_users: [123456789]    # Telegram user ids the bot answers (default: chat_id)
+#     tshoot_model: claude          # or gemini
 #   events: [wan, dns, new_device, firmware, upnp, monitor, anomaly, iot_lan, vpn]   # the default; add `daily` (LLM briefing summary), `report` (weekly/monthly report), `vpn_sessions` (every WireGuard connect/disconnect)
 #   wan_min_downtime_seconds: 60                        # shorter outages are not pushed
 #   timezone: Europe/Berlin                             # times in messages (default: host's)
 #   dashboard_url: http://my-host.tailnet.ts.net:8080   # optional link under each message
+
+# Optional: known fixes for self-check problems (router_agent/remedy.py). Low-risk ones run
+# on their own right after the alert (max 2 per fix per 24 h); the rest are Telegram buttons.
+# remedy:
+#   auto: true
 
 # Optional: the dashboard's network map (Map tab) places devices in rooms by their name
 # ("kitchen_Google-Home-Mini" -> Kitchen); phones/laptops go to Mobile, servers to Server,

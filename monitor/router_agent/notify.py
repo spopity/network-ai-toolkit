@@ -11,7 +11,11 @@ What is sent (each can be switched off with `notify.events` in config.yml):
               (router/update-notification posts it to /api/router-event)
   monitor     network-ai itself is unhealthy / healthy again: stale checks, failed daily
               analysis, old backup, Postgres/dashboard down, low disk, watchdog dead
-              (router_agent/selfcheck.py)
+              (router_agent/selfcheck.py), and the result of every fix tried for it
+              (`remedy` events, router_agent/remedy.py). With `notify.telegram.interactive:
+              true` problem alerts carry [Fix] / [Troubleshoot] / [Mute 24 h] buttons that
+              router_agent/telegram_bot.py answers; a muted check (logs/.notify_mute.json)
+              is still recorded and auto-fixed, just not sent
   anomaly     an appliance behaves unusually: many new sites in an hour or an upload far
               above its own baseline (router_agent/anomaly.py; phones/computers skipped)
   upnp        a device opened a port to the internet via UPnP for the first time
@@ -52,6 +56,7 @@ import requests
 
 API = "https://api.telegram.org/bot{token}/{method}"
 QUEUE_FILE = ".notify_queue.jsonl"
+MUTE_FILE = ".notify_mute.json"   # {check: until-ISO}, written by the Telegram bot
 LOCK_FILE = ".notify.lock"
 QUEUE_MAX = 50                       # oldest dropped beyond this
 QUEUE_MAX_AGE = timedelta(days=2)    # older undelivered messages are dropped, not sent
@@ -66,7 +71,7 @@ _notifier = None  # set by configure(); every hook is a no-op without it
 class Notifier:
     def __init__(self, token: str, chat_id: str, log_dir: Path, events=DEFAULT_EVENTS,
                  tz: str | None = None, dashboard_url: str | None = None,
-                 wan_min_downtime_seconds: float = 60):
+                 wan_min_downtime_seconds: float = 60, interactive: bool = False):
         self.token = token
         self.chat_id = str(chat_id)
         self.base = Path(log_dir)
@@ -74,6 +79,7 @@ class Notifier:
         self.tz = ZoneInfo(tz) if tz else None
         self.dashboard_url = (dashboard_url or "").rstrip("/") or None
         self.wan_min_downtime = wan_min_downtime_seconds
+        self.interactive = interactive  # buttons only make sense while telegram_bot.py answers them
 
     @classmethod
     def from_config(cls, cfg: dict, log_dir) -> "Notifier | None":
@@ -88,7 +94,8 @@ class Notifier:
             print(f"warning: unknown notify.events {sorted(unknown)} ignored", file=sys.stderr)
         return cls(token, tg["chat_id"], log_dir, events=events, tz=ncfg.get("timezone"),
                    dashboard_url=ncfg.get("dashboard_url"),
-                   wan_min_downtime_seconds=ncfg.get("wan_min_downtime_seconds", 60))
+                   wan_min_downtime_seconds=ncfg.get("wan_min_downtime_seconds", 60),
+                   interactive=bool(tg.get("interactive")))
 
     # ---- formatting helpers ----
 
@@ -104,13 +111,14 @@ class Notifier:
 
     # ---- delivery ----
 
-    def _post(self, text: str) -> str:
-        """-> "ok" | "retry" (network / 5xx / 429: queue it) | "drop" (permanent error)."""
+    def _post(self, text: str, buttons: list | None = None) -> str:
+        """-> "ok" | "retry" (network / 5xx / 429: queue it) | "drop" (permanent error).
+        `buttons`: rows of (label, callback_data) for an inline keyboard."""
+        body = {"chat_id": self.chat_id, "text": text[:4000], "parse_mode": "HTML", "disable_web_page_preview": True}
+        if buttons:
+            body["reply_markup"] = keyboard(buttons)
         try:
-            r = requests.post(API.format(token=self.token, method="sendMessage"), timeout=TIMEOUT, json={
-                "chat_id": self.chat_id, "text": text[:4000], "parse_mode": "HTML",
-                "disable_web_page_preview": True,
-            })
+            r = requests.post(API.format(token=self.token, method="sendMessage"), timeout=TIMEOUT, json=body)
         except requests.RequestException as e:
             print(f"notify: telegram unreachable, queued ({e.__class__.__name__})", file=sys.stderr)
             return "retry"
@@ -158,24 +166,28 @@ class Notifier:
         for i, item in enumerate(queue):
             if datetime.fromisoformat(item["ts"]) < cutoff:
                 continue
-            res = self._post(f"<i>⏱ delayed, from {self.hhmm(item['ts'])}</i>\n{item['text']}")
+            res = self._post(f"<i>⏱ delayed, from {self.hhmm(item['ts'])}</i>\n{item['text']}", item.get("buttons"))
             if res == "retry":
                 remaining = [q for q in queue[i:] if datetime.fromisoformat(q["ts"]) >= cutoff]
                 break
         self._write_queue(remaining)
         return not remaining
 
-    def send(self, text: str) -> bool:
+    def send(self, text: str, buttons: list | None = None) -> bool:
         """Send now (after anything still queued, to keep the order). Never raises.
-        -> True if delivered."""
+        -> True if delivered. Buttons are dropped unless notify.telegram.interactive is on."""
+        buttons = buttons if self.interactive else None
         try:
             with self._locked():
                 if self._flush_locked():
-                    res = self._post(text)
+                    res = self._post(text, buttons)
                     if res != "retry":
                         return res == "ok"
                 queue = self._read_queue()
-                queue.append({"ts": datetime.now(UTC).isoformat(timespec="seconds"), "text": text})
+                item = {"ts": datetime.now(UTC).isoformat(timespec="seconds"), "text": text}
+                if buttons:
+                    item["buttons"] = buttons
+                queue.append(item)
                 self._write_queue(queue)
                 return False
         except Exception as e:  # notifications are best-effort
@@ -190,6 +202,20 @@ class Notifier:
                 self._flush_locked()
         except Exception as e:
             print(f"notify: flush failed: {e}", file=sys.stderr)
+
+    def _send(self, text: str, buttons: list | None) -> None:
+        """send() with buttons only when the bot answers them (keeps send(text) for everything else)."""
+        if self.interactive and buttons:
+            self.send(text, buttons)
+        else:
+            self.send(text)
+
+    def muted(self, check: str) -> bool:
+        try:
+            until = json.loads((self.base / MUTE_FILE).read_text()).get(check)
+            return bool(until) and datetime.fromisoformat(until) > datetime.now(UTC)
+        except (OSError, ValueError, TypeError):
+            return False
 
     def _footer(self) -> str:
         return f'\n<a href="{html.escape(self.dashboard_url)}">Dashboard</a>' if self.dashboard_url else ""
@@ -229,8 +255,20 @@ class Notifier:
                 '<a href="https://www.asuswrt-merlin.net/changelog">Changelog</a>'
             )
         elif kind == "monitor_problem" and "monitor" in self.events:
-            self.send(f"⚠️ <b>network-ai: {html.escape(event.get('title') or event.get('check') or '?')} problem</b>\n"
-                      f"{html.escape(event.get('problem') or '')}\nSince {self.hhmm(event.get('since'))}." + self._footer())
+            check = event.get("check") or "?"
+            if self.muted(check):
+                return
+            fixes = event.get("fixes") or []
+            auto = [f["title"] for f in fixes if f.get("auto")]
+            text = (f"⚠️ <b>network-ai: {html.escape(event.get('title') or check)} problem</b>\n"
+                    f"{html.escape(event.get('problem') or '')}\nSince {self.hhmm(event.get('since'))}.")
+            if auto:
+                text += "\n🔧 Trying automatically: " + html.escape(", ".join(auto)) + "…"
+            buttons = [[(f"🔧 {f['title']}", f"fix:{f['id']}:{check}")] for f in fixes if not f.get("auto")]
+            buttons.append([("🩺 Troubleshoot", f"ts:{check}"), ("🔕 Mute 24 h", f"mute:{check}")])
+            self._send(text + self._footer(), buttons)
+        elif kind == "remedy" and "monitor" in self.events:
+            self._remedy(event)
         elif kind == "monitor_ok" and "monitor" in self.events:
             since = f" (failing since {self.hhmm(event['since'])})" if event.get("since") else ""
             self.send(f"✅ <b>network-ai: {html.escape(event.get('title') or event.get('check') or '?')} OK again</b>{since}."
@@ -267,6 +305,22 @@ class Notifier:
             lines.append("First time for this device (via UPnP). If unexpected, turn it off in the "
                          "device's settings or disable UPnP on the router.")
             self.send("\n".join(lines) + self._footer())
+
+    def _remedy(self, event: dict) -> None:
+        how = {"auto": "automatic", "telegram": f"asked by {event.get('by') or 'you'} in Telegram",
+               "cli": "run by hand"}.get(event.get("trigger"), event.get("trigger") or "")
+        title = html.escape(event.get("title") or event.get("fix") or "?")
+        lines = [f"{'🛠️' if event.get('ok') else '❌'} <b>{'Fixed' if event.get('ok') else 'Fix failed'}: {title}</b>"
+                 + (f" ({html.escape(how)})" if how else "")]
+        if event.get("note"):
+            lines.append(html.escape(event["note"]))
+        if not event.get("ok") and event.get("detail"):
+            lines.append(f"<code>{html.escape(event['detail'][-300:])}</code>")
+        if event.get("ok"):
+            lines.append("The next check confirms it (✅ OK again).")
+        check = event.get("check") or ""
+        buttons = None if event.get("ok") else [[("🩺 Troubleshoot", f"ts:{check}" if check else f"tsfix:{event.get('fix')}")]]
+        self._send("\n".join(lines) + self._footer(), buttons)
 
     def _vpn_event(self, event: dict, kind: str) -> None:
         from .geoip import describe
@@ -339,6 +393,11 @@ class Notifier:
         else:
             lines += ["", f"(no AI summary: {html.escape((record.get('error') or 'no LLM answered')[:300])})"]
         self.send("\n".join(lines) + self._footer())
+
+
+def keyboard(rows: list) -> dict:
+    """[[(label, callback_data), ...], ...] -> Telegram inline keyboard (data max 64 bytes)."""
+    return {"inline_keyboard": [[{"text": label, "callback_data": data[:64]} for label, data in row] for row in rows]}
 
 
 def mb(n: float) -> str:

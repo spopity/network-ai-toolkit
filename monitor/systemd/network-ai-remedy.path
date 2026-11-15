@@ -1,0 +1,10 @@
+[Unit]
+Description=Network AI - run fixes requested from Telegram
+
+[Path]
+# the unprivileged Telegram bot appends requests here; the fixes run as root
+PathChanged=/opt/network-ai/logs/.remedy-requests.jsonl
+Unit=network-ai-remedy.service
+
+[Install]
+WantedBy=multi-user.target

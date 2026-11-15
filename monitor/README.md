@@ -19,6 +19,7 @@ connection after a sustained outage.
 - `router_agent/rollup.py` — day-long aggregation of the checks (`logs/rollup.json`). Each check keeps only the log lines newer than the previous check (timestamp cursor in `logs/.log_cursor.json`, so overlapping tails are never double-counted) and merges their syslog templates and firewall-drop counters, plus peaks/minimums (load, memory, temperatures, wifi clients, WAN-down checks, router reboots). The daily analysis renders it into the LLM's input (`day_summary` in the daily record).
 - Storage: daily records `logs/<router>-<ts>.json` (kept `retention_days`), checks gzipped in `logs/checks/` (kept `check_retention_hours`, ~9 KB each). Postgres gets every check too (`kind='check'`, raw log tails stripped); `/api/history` thins checks to ~hourly beyond 2 days. **Postgres retention**: the daily run deletes 5-minute snapshots, `dns_lookups` and `traffic_usage` rows older than `db_retention_days` (default 90; 0 = keep forever; values under 7 are refused), via `db.prune_old()` / `RETENTION_TABLES`. Kept forever: daily analyses, `watchdog_events`, `dns_devices`/`dns_first_seen` (the "new domain" detection needs every domain a device ever used) and Tshoot's `tshoot_audit`. Works on any Postgres (plain `DELETE`). **With TimescaleDB** (installed in the `network_ai` database since 2026-11-14) the daily run's `db.ensure_timescale()` also sets up, once and idempotently: `dns_lookups` and `traffic_usage` as hypertables (7-day chunks, compressed once 14 days old, because the Traffic Analyzer catch-up writes up to 2 weeks back), retention by whole chunks (`drop_chunks`, never inside the 30-day summary refresh window), and the daily per-device summaries `traffic_daily` (rx/tx) and `dns_daily` (queries/blocked), refreshed hourly and **kept forever**. The summaries deliberately carry no domain or app names, so the hidden list can't outlive a purge in them. Long-range API: `/api/traffic/history` and `/api/dns/history` (`?days=365&bucket=day|week|month&device=&network=`, totals per period + top devices; on plain Postgres they read the raw tables instead). `snapshots` stays a plain table: its daily rows (the LLM analyses) must survive while check rows are deleted. New wifi clients come from `logs/known_clients.json` (a client counts as new for 24 h after it first appears; devices unseen for `retention_days` are forgotten).
 - `router_agent/notify.py` — Telegram push notifications (see "Telegram notifications").
+- `router_agent/telegram_bot.py` + `router_agent/remedy.py` — answer alerts from Telegram: known fixes (automatic or one tap) and a Tshoot chat with Approve/Reject (see "Acting on alerts from Telegram").
 - `watchdog.py` — continuous connectivity monitor; restarts WAN (`service "restart_wan_if <unit>"`, quoted: Merlin ignores the unquoted form) after `down_threshold_seconds` of outage, with a cooldown between attempts. Supports `--dry-run` and `--max-iterations` for safe testing.
 - `dashboard/app.py` — Flask backend: serves the built React app as static files, `/api/state` (live), `/api/history` (Postgres-backed trends), `/api/collect-now` + `/api/collect-status` (on-demand trigger).
 - `dashboard/app.py` also proxies `/api/tshoot/*` to the separate **Tshoot** troubleshooting agent (`/opt/tshoot`, `127.0.0.1:8090`); its chat UI is the dashboard's Tshoot tab (`dashboard/frontend/src/tshoot/`). See [`../tshoot/README.md`](../tshoot/README.md).
@@ -211,13 +212,14 @@ There is deliberately no CD from GitHub: development happens on this host, so CI
 ### Installing as systemd services
 
 ```bash
-sudo cp systemd/*.service systemd/*.timer /etc/systemd/system/
+sudo cp systemd/*.service systemd/*.timer systemd/*.path /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now network-ai-watchdog.service
 sudo systemctl enable --now network-ai-dashboard.service
 sudo systemctl enable --now network-ai-collect.timer   # daily LLM analysis
 sudo systemctl enable --now network-ai-check.timer     # 5-minute checks, no LLM
 sudo systemctl enable --now router-backup.timer        # daily router backup, see below
+sudo systemctl enable --now network-ai-telegram.service network-ai-remedy.path  # optional: Telegram bot + fixes
 ```
 
 After changing the frontend, rebuild (`npm run build` in `dashboard/frontend`)
@@ -261,7 +263,7 @@ reconfigure in the web UI and look values up with `gzip -dc $B/nvram.txt.gz | gr
 | `dns` | DNS health changes to unfiltered / down / ok again | `dnshealth.py` via `events.append_router_event` |
 | `new_device` | a wifi client seen for the first time (known_clients.json; devices forgotten after `retention_days` count as new again) | 5-minute check |
 | `firmware` | new Merlin release (`router/update-notification`) | `/api/router-event` |
-| `monitor` | network-ai itself is unhealthy, and again when fixed (see "Monitoring the monitor") | watchdog / 5-minute check |
+| `monitor` | network-ai itself is unhealthy, and again when fixed (see "Monitoring the monitor"), plus every fix tried for it (`remedy`: automatic or from a button, see "Acting on alerts from Telegram") | watchdog / 5-minute check |
 | `anomaly` | an appliance contacts many new sites in an hour or uploads far more than usual (see "Unusual device behaviour") | 5-minute check |
 | `upnp` | a device opens a port to the internet via UPnP **for the first time** (see "UPnP port mappings") | 5-minute check |
 | `report` | the weekly (Mondays) / monthly (1st) network report: key numbers + AI summary; opt-in (`router_agent/report.py`, `network-ai-report-{weekly,monthly}.timer`, Report card on Monitor, `/api/reports`) | report timer |
@@ -288,6 +290,66 @@ Setup:
 5. `sudo systemctl restart network-ai-watchdog.service network-ai-dashboard.service`
    (the 5-minute check picks the config up on its own).
 
+## Acting on alerts from Telegram
+
+Being told is not enough when nobody can sit down at a terminal, so alerts can be acted on
+from the phone. Two parts:
+
+**Known fixes** (`router_agent/remedy.py`, a fixed catalogue in code; the LLM never picks
+them). `python -m router_agent.remedy --list` shows it:
+
+| Fix | Runs | For |
+|---|---|---|
+| `hour_monitor` | automatically | `traffic`, router setup item `hour_monitor` (Traffic Analyzer writer; started directly because `service start_hour_monitor` does nothing) |
+| `syslog_ng` | automatically | router setup `syslog_ng` / `syslog_socket` (`/opt/etc/init.d/S01syslog-ng restart`) |
+| `nat_start` | automatically | `dns_redirect:*`, `ntp_redirect:*` (the script deletes and re-adds its own rules) |
+| `services_start` | automatically | `ntp_sdn`, `root_ssh_keys` (a password change via the GUI/app runs `chpass`, which empties root's `authorized_keys` and so locks Tshoot out; its key lives only in `/jffs/network-ai/authorized_keys`) |
+| `dashboard`, `watchdog` | automatically | the `dashboard` / `watchdog` self-checks (`systemctl restart`) |
+| `firewall_start` | one tap | `iot_lan`, `sdn_accept:*`, `skynet_*` (restarts Skynet: heavy) |
+| `run_check` | one tap | `checks` (one check now: shows whether SSH to the router works) |
+
+Automatic fixes run in the self-check right after its problem alert (so after the
+check's grace period), at most twice per fix in 24 h and 15 min apart; `remedy: {auto:
+false}` in config.yml turns them off. Every attempt -- automatic, tapped or
+`--run <fix>` by hand -- is a `remedy` router event: Events card, Postgres, and a
+Telegram message (`monitor`) saying "Fixed" or "Fix failed" with the output; the
+self-check's own "OK again" confirms it on the next pass.
+
+**The bot** (`router_agent/telegram_bot.py`, `network-ai-telegram.service`, user `netai`,
+no root, no SSH). It long-polls Telegram, so nothing new listens on this host, and only
+answers your chat (`notify.telegram.chat_id`) and users in `notify.telegram.allowed_users`
+(default: the chat id = you). With `notify.telegram.interactive: true` problem alerts get
+buttons:
+
+- **🔧 \<fix\>**: the tap-only fixes for that problem. The bot only appends a request to
+  `logs/.remedy-requests.jsonl`; `network-ai-remedy.path` starts `network-ai-remedy.service`
+  as root, which re-checks it against the catalogue and drops requests older than 10 min.
+- **🩺 Troubleshoot**: a new Tshoot session seeded with the problem text.
+- **🔕 Mute 24 h**: that check's problem alerts are not sent for 24 h (still recorded and
+  auto-fixed); `/unmute` undoes it.
+
+Any text you send goes to **Tshoot** (Claude, Gemini fallback; same tools and policy as the
+dashboard's Tshoot tab). Its answer comes back with the commands it ran; a change it wants
+to make arrives as a card with **✅ Approve / ❌ Reject**, risk and warnings. Tshoot's
+`high` risk changes (reboot, WAN/LAN/Wi-Fi/SSH restarts, firewall flushes, ...) also need
+`TELEGRAM_APPROVAL_PIN` from `.env` as a reply (deleted right away; 3 tries, 2 minutes,
+then the change is rejected); with no PIN set they can't be approved from Telegram at all.
+Blocked commands stay blocked. In Telegram the bot is the approver check instead of
+`dashboard.approvers`; Tshoot's audit log records `telegram:<user>`. Commands: `/status`
+(open problems), `/fixes` (every fix as a button), `/new` (fresh Tshoot conversation),
+`/unmute`, `/cancel`, `/help`.
+
+Setup (after the notifications above work):
+
+1. `.env`: `TELEGRAM_APPROVAL_PIN=` (digits or a phrase; without it high-risk approvals
+   stay on the dashboard). `TSHOOT_PROXY_KEY` is already there for the dashboard.
+2. `config.yml` → `notify.telegram.interactive: true` (and `allowed_users` if the chat is a group).
+3. `sudo cp systemd/network-ai-telegram.service systemd/network-ai-remedy.* /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now network-ai-telegram.service network-ai-remedy.path`
+4. Send the bot `/status`.
+
+Only one process may long-poll a bot: `notify --chat-id` (which uses getUpdates too) may
+miss messages while the bot runs, and stealing updates from it is harmless.
+
 ## Monitoring the monitor
 
 `router_agent/selfcheck.py` checks that network-ai itself is working. The watchdog runs it
@@ -302,7 +364,7 @@ every 5 minutes; the 5-minute check watches the watchdog, so each guards the oth
 | dashboard | `http://127.0.0.1:<port>/api/state` does not answer | 10 min |
 | disk | under 10 % free on the disk holding `logs/` | — |
 | watchdog | `logs/watchdog_status.json` older than 5 min (checked by the 5-minute check) | — |
-| traffic | no new Traffic Analyzer rows for 3 h (when `traffic_analyzer:` is on) | — |
+| traffic | no new Traffic Analyzer rows for 3 h (when `traffic_analyzer:` is on); the usual cause, `hour_monitor` dying, is reported sooner by `router_setup` | — |
 | iot_lan | the router's IoT → LAN LOG rule is missing (when `iot_lan:` is on; see "IoT devices reaching for the LAN") | — |
 | cert | the certificate the router's web UI serves (`/etc/cert.pem`, Let's Encrypt for the DDNS name) expires in under `cert_min_days` (20) days; says whether Let's Encrypt renewal is switched off (`le_enable`) or failing | — |
 | router_setup | something the router's hook scripts/add-ons set up, and that was there before, is missing (see "Router setup drift") | 15 min |
@@ -330,9 +392,10 @@ stick that didn't mount) just makes things quieter. Every 5-minute check
 | `skynet_ipsets`, `skynet_rules` (raw table) | `firewall-start` (Skynet) |
 | `sdn_accept:br0>br54` (LAN → IoT allowed) | `firewall-start` |
 | `dns_redirect:<bridge>` (Guest/IoT DNS → AdGuardHome), `ntp_redirect:<bridge>` | `nat-start` |
-| `ntp_sdn` (process), `root_ssh_keys` | `services-start` |
+| `ntp_sdn` (process), `root_ssh_keys` (every key of `/jffs/network-ai/authorized_keys` is in root's `authorized_keys`; a password change empties it down to the GUI's keys) | `services-start` |
 | `entware`, `swap`, `syslog_ng` (scribe), most `cron:<tag>` jobs | `post-mount` / the add-ons on the USB stick |
 | `syslog_socket`: syslog-ng still owns `/dev/log` (a firmware service restart can recreate the socket; syslog-ng then silently drops all userspace logs until `/opt/etc/init.d/S01syslog-ng restart`) | scribe |
+| `hour_monitor`: the firmware daemon that saves Traffic Analyzer statistics to `TrafficAnalyzer.db` (died in the service batch of a password change on 2026-11-14; `service start_hour_monitor` did not restart it, `nohup /sbin/hour_monitor </dev/null >/dev/null 2>&1 &` over SSH did) | firmware (Traffic Analyzer → Statistic) |
 | `dhcp_ntp:<dnsmasq conf>` (DHCP option 42) | `dnsmasq*.postconf` |
 | `script:<name>` (every executable in `/jffs/scripts`, `*.bak*` skipped), `jffs_scripts` | `/jffs` + the custom-scripts setting |
 
@@ -511,6 +574,11 @@ first run backfilled the router's whole history (13 days, 66k rows).
 - Dashboard: "Internet usage" card on Monitor (24h/7d/14d, per network, per device).
 - Tshoot: `get_traffic_usage` tool.
 - Not sent to the daily LLM analysis (no extra tokens).
+- **If it stops**: the database is written by the firmware daemon `hour_monitor`. It can die
+  (it did during a password change's service restarts, 2026-11-14) while the Traffic Analyzer
+  stays enabled; `service start_hour_monitor` then did nothing. Restart it with
+  `ssh admin@192.168.1.1 'nohup /sbin/hour_monitor </dev/null >/dev/null 2>&1 &'`. The router
+  setup check alerts on it (`hour_monitor` item); the rows it did not save are lost.
 
 Only internet traffic is measured, not traffic between devices at home.
 

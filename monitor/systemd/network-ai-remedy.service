@@ -1,0 +1,12 @@
+[Unit]
+Description=Network AI - run fixes requested from Telegram (router_agent/remedy.py FIXES only)
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/network-ai
+# only fixes from the fixed catalogue in router_agent/remedy.py, requests older than 10 min are dropped
+ExecStart=/opt/network-ai/.venv/bin/python3 -m router_agent.remedy --config /opt/network-ai/config.yml --run-queue
+User=root
+UMask=0007
+TimeoutStartSec=5min

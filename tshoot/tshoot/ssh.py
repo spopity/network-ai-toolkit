@@ -32,9 +32,16 @@ class RouterShell:
     def _connect(self):
         client = paramiko.SSHClient()
         client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        client.connect(self.host, port=self.port, username=self.username, key_filename=self.key_filename,
-                       timeout=self.connect_timeout, banner_timeout=self.connect_timeout,
-                       auth_timeout=self.connect_timeout, look_for_keys=False, allow_agent=False)
+        try:
+            client.connect(self.host, port=self.port, username=self.username, key_filename=self.key_filename,
+                           timeout=self.connect_timeout, banner_timeout=self.connect_timeout,
+                           auth_timeout=self.connect_timeout, look_for_keys=False, allow_agent=False)
+        except Exception:
+            # a failed login leaves the TCP connection open: dropbear then holds it as an
+            # unauthenticated session for 5 min, and a few of those make it refuse every new
+            # connection from this host (the monitor's checks too). Close it now.
+            client.close()
+            raise
         client.get_transport().set_keepalive(30)
         self._client = client
 

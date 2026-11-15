@@ -14,6 +14,7 @@ skynet_ipsets=12
 skynet_rules=8
 ntp_sdn=1
 syslog_ng=1
+hour_monitor=1
 syslog_socket=1
 root_ssh_keys=1
 dns_redirect:br54=1
@@ -124,3 +125,11 @@ def test_command_is_collected():
     from router_agent.collector import COMMAND_GROUPS
     assert SETUP_CMD in COMMAND_GROUPS["services"]
     assert SETUP_CMD.rstrip().endswith(f'echo "{routersetup.END_MARK}=1"')
+
+
+def test_hour_monitor_dying_is_reported_with_the_fix(tmp_path):
+    w = SetupWatch(tmp_path)
+    w.check(FULL, NOW)
+    missing = w.check(FULL.replace("hour_monitor=1", "hour_monitor=0"), NOW)["missing"]
+    assert missing == ["hour_monitor"]
+    assert "/sbin/hour_monitor" in describe_missing(missing)

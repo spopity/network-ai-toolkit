@@ -41,6 +41,8 @@ from pathlib import Path
 
 import requests
 
+from . import remedy
+
 logger = logging.getLogger(__name__)
 
 STATE_FILE = ".selfcheck.json"
@@ -155,7 +157,7 @@ def check_traffic(log_dir: Path, now: datetime, max_age: timedelta) -> str | Non
     t = datetime.fromtimestamp(int(cur["ts"]), UTC)
     if now - t > max_age:
         return (f"newest Traffic Analyzer row is {_age(t, now)} old: the router stopped writing "
-                "/jffs/.sys/TrafficAnalyzer/TrafficAnalyzer.db")
+                "/jffs/.sys/TrafficAnalyzer/TrafficAnalyzer.db (is the firmware's hour_monitor running?)")
     return None
 
 
@@ -275,7 +277,12 @@ def run(cfg: dict, log_dir, only=None, skip=(), now: datetime | None = None) -> 
             events = update_state(state, results, now)
             (log_dir / STATE_FILE).write_text(json.dumps(state, indent=1))
         for e in events:
+            if e["event"] == "monitor_problem":  # known fixes: Telegram buttons / auto (router_agent/remedy.py)
+                e["fixes"] = [{"id": f, "title": remedy.FIXES[f].title, "auto": remedy.FIXES[f].auto}
+                              for f in remedy.fixes_for(e["check"], log_dir)]
             append_router_event(log_dir, e)
+        # only the checks this process evaluated: watchdog and the 5-minute check each fix their own
+        remedy.auto_fix(cfg, log_dir, {k: state[k] for k in results if k in state}, now)
         heartbeat(cfg, results)
         return results
     except Exception as e:

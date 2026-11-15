@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ArrowDownRight, CheckCircle2, Globe, History, KeyRound, Lock, LockOpen, Power, RefreshCw, Router as RouterIcon, ShieldAlert, ShieldCheck } from 'lucide-react';
+import { ArrowDownRight, CheckCircle2, Globe, History, KeyRound, Lock, LockOpen, Power, RefreshCw, Router as RouterIcon, ShieldAlert, ShieldCheck, Wrench } from 'lucide-react';
 import type { DashboardState, HistoryResponse, WatchdogEvent } from '../types';
 import { Card, TONE, type Tone } from '../components/ui';
 import { dayClock, duration, relTime } from '../lib/format';
@@ -37,6 +37,10 @@ function describe(e: Ev): { label: string; sub?: string; tone: Tone; icon: typeo
         return { label: `Monitoring: ${String(d.title ?? d.check)} problem`, sub: d.problem ? String(d.problem) : undefined, tone: 'high', icon: ShieldAlert };
       if (e.event === 'monitor_ok')
         return { label: `Monitoring: ${String(d.title ?? d.check)} OK again`, tone: 'ok', icon: CheckCircle2 };
+      if (e.event === 'remedy') {
+        const how = d.trigger === 'auto' ? 'automatic' : d.trigger === 'telegram' ? `from Telegram${d.by ? ` (${String(d.by)})` : ''}` : String(d.trigger ?? '');
+        return { label: `${d.ok ? 'Fixed' : 'Fix failed'}: ${String(d.title ?? d.fix)}`, sub: [how, d.ok ? undefined : d.detail].filter(Boolean).join(' · ') || undefined, tone: d.ok ? 'ok' : 'high', icon: Wrench };
+      }
       if (e.event === 'iot_lan') {
         const targets = Array.isArray(d.targets) ? (d.targets as string[]) : [];
         return { label: `IoT device ${String(d.device ?? d.ip)} tried to reach the LAN`, sub: targets.join(', ') || undefined, tone: 'caution', icon: ShieldAlert };

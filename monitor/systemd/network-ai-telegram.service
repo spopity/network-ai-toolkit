@@ -1,0 +1,45 @@
+[Unit]
+Description=Network AI - Telegram bot (alert buttons, fixes on request, Tshoot chat; unprivileged)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=netai
+Group=netai
+WorkingDirectory=/opt/network-ai
+# .env stays root-only (0600); systemd reads it before dropping privileges
+EnvironmentFile=/opt/network-ai/.env
+Environment=NETWORK_AI_CONFIG=/opt/network-ai/config.yml
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/network-ai/.venv/bin/python3 -m router_agent.telegram_bot --config /opt/network-ai/config.yml
+Restart=always
+RestartSec=15
+UMask=0007
+
+# sandbox: talks to api.telegram.org and Tshoot (127.0.0.1:8090), writes logs/ only.
+# Fixes it is asked for run as root via network-ai-remedy.path, never here.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/network-ai/logs
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target
